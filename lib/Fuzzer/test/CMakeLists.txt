@@ -102,10 +102,12 @@ set(Tests
   StrcmpTest
   StrncmpTest
   StrstrTest
+  SwapCmpTest
   SwitchTest
   ThreadedLeakTest
   ThreadedTest
   TimeoutTest
+  TraceMallocTest
   )
 
 if(APPLE)

@@ -1362,7 +1362,16 @@ static bool canReplaceOperandWithVariable(const Instruction *I,
     // FIXME: many arithmetic intrinsics have no issue taking a
     // variable, however it's hard to distingish these from
     // specials such as @llvm.frameaddress that require a constant.
-    return !isa<IntrinsicInst>(I);
+    if (isa<IntrinsicInst>(I))
+      return false;
+
+    // Constant bundle operands may need to retain their constant-ness for
+    // correctness.
+    if (ImmutableCallSite(I).isBundleOperand(OpIdx))
+      return false;
+
+    return true;
+
   case Instruction::ShuffleVector:
     // Shufflevector masks are constant.
     return OpIdx != 2;
@@ -1575,12 +1584,15 @@ namespace {
       Fail = false;
       Insts.clear();
       for (auto *BB : Blocks) {
-        if (BB->size() <= 1) {
-          // Block wasn't big enough
-          Fail = true;
-          return;
+        if (Instruction *Terminator = BB->getTerminator()) {
+          if (Instruction *LastNonTerminator = Terminator->getPrevNode()) {
+            Insts.push_back(LastNonTerminator);
+            continue;
+          }
         }
-        Insts.push_back(BB->getTerminator()->getPrevNode());
+        // Block wasn't big enough.
+        Fail = true;
+        return;
       }
     }
 
@@ -1592,11 +1604,12 @@ namespace {
       if (Fail)
         return;
       for (auto *&Inst : Insts) {
-        if (Inst == &Inst->getParent()->front()) {
+        Inst = Inst->getPrevNode();
+        // Already at beginning of block.
+        if (!Inst) {
           Fail = true;
           return;
         }
-        Inst = Inst->getPrevNode();
       }
     }
 

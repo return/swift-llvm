@@ -3973,13 +3973,13 @@ void SelectionDAGBuilder::visitAtomicLoad(const LoadInst &I) {
                            MachineMemOperand::MOLoad,
                            VT.getStoreSize(),
                            I.getAlignment() ? I.getAlignment() :
-                                              DAG.getEVTAlignment(VT));
+                                              DAG.getEVTAlignment(VT),
+                           AAMDNodes(), nullptr, Scope, Order);
 
   InChain = TLI.prepareVolatileOrAtomicLoad(InChain, dl, DAG);
   SDValue L =
       DAG.getAtomic(ISD::ATOMIC_LOAD, dl, VT, VT, InChain,
-                    getValue(I.getPointerOperand()), MMO,
-                    Order, Scope);
+                    getValue(I.getPointerOperand()), MMO);
 
   SDValue OutChain = L.getValue(1);
 
@@ -4769,6 +4769,10 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
     setValue(&I, DAG.getNode(ISD::RETURNADDR, sdl,
                              TLI.getPointerTy(DAG.getDataLayout()),
                              getValue(I.getArgOperand(0))));
+    return nullptr;
+  case Intrinsic::addressofreturnaddress:
+    setValue(&I, DAG.getNode(ISD::ADDROFRETURNADDR, sdl,
+                             TLI.getPointerTy(DAG.getDataLayout())));
     return nullptr;
   case Intrinsic::frameaddress:
     setValue(&I, DAG.getNode(ISD::FRAMEADDR, sdl,

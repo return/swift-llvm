@@ -76,6 +76,7 @@ protected:
   bool FP64Denormals;
   bool FPExceptions;
   bool FlatForGlobal;
+  bool UnalignedScratchAccess;
   bool UnalignedBufferAccess;
   bool EnableXNACK;
   bool DebuggerInsertNops;
@@ -99,6 +100,8 @@ protected:
   bool SGPRInitBug;
   bool HasSMemRealTime;
   bool Has16BitInsts;
+  bool HasMovrel;
+  bool HasVGPRIndexMode;
   bool FlatAddressSpace;
   bool R600ALUInst;
   bool CaymanISA;
@@ -273,6 +276,10 @@ public:
 
   bool hasUnalignedBufferAccess() const {
     return UnalignedBufferAccess;
+  }
+
+  bool hasUnalignedScratchAccess() const {
+    return UnalignedScratchAccess;
   }
 
   bool isXNACKEnabled() const {
@@ -499,6 +506,14 @@ public:
 
   bool has16BitInsts() const {
     return Has16BitInsts;
+  }
+
+  bool hasMovrel() const {
+    return HasMovrel;
+  }
+
+  bool hasVGPRIndexMode() const {
+    return HasVGPRIndexMode;
   }
 
   bool hasScalarCompareEq64() const {
