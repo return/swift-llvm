@@ -328,8 +328,6 @@ namespace rdf {
   template <typename T> struct NodeAddr {
     NodeAddr() : Addr(nullptr), Id(0) {}
     NodeAddr(T A, NodeId I) : Addr(A), Id(I) {}
-    NodeAddr(const NodeAddr&) = default;
-    NodeAddr &operator= (const NodeAddr&) = default;
 
     bool operator== (const NodeAddr<T> &NA) const {
       assert((Addr == NA.Addr) == (Id == NA.Id));
@@ -406,9 +404,8 @@ namespace rdf {
 
     RegisterRef() : RegisterRef(0) {}
     explicit RegisterRef(RegisterId R, LaneBitmask M = ~LaneBitmask(0))
-      : Reg(R), Mask(M) {}
-    RegisterRef(const RegisterRef &RR) = default;
-    RegisterRef &operator= (const RegisterRef &RR) = default;
+      : Reg(R), Mask(R != 0 ? M : 0) {}
+    operator bool() const { return Reg != 0 && Mask != LaneBitmask(0); }
     bool operator== (const RegisterRef &RR) const {
       return Reg == RR.Reg && Mask == RR.Mask;
     }
@@ -511,6 +508,9 @@ namespace rdf {
     RegisterAggr &insert(RegisterRef RR);
     RegisterAggr &insert(const RegisterAggr &RG);
     RegisterAggr &clear(RegisterRef RR);
+    RegisterAggr &clear(const RegisterAggr &RG);
+
+    RegisterRef clearIn(RegisterRef RR) const;
 
     void print(raw_ostream &OS) const;
 
@@ -786,7 +786,7 @@ namespace rdf {
 
     // Make this std::unordered_map for speed of accessing elements.
     // Map: Register (physical or virtual) -> DefStack
-    typedef std::unordered_map<uint32_t,DefStack> DefStackMap;
+    typedef std::unordered_map<RegisterId,DefStack> DefStackMap;
 
     void build(unsigned Options = BuildOptions::None);
     void pushDefs(NodeAddr<InstrNode*> IA, DefStackMap &DM);
@@ -797,6 +797,8 @@ namespace rdf {
     PackedRegisterRef pack(RegisterRef RR) const { return LMI.pack(RR); }
     RegisterRef unpack(PackedRegisterRef PR) const { return LMI.unpack(PR); }
     RegisterRef makeRegRef(unsigned Reg, unsigned Sub) const;
+    RegisterRef normalizeRef(RegisterRef RR) const;
+    RegisterRef restrictRef(RegisterRef AR, RegisterRef BR) const;
 
     NodeAddr<RefNode*> getNextRelated(NodeAddr<InstrNode*> IA,
         NodeAddr<RefNode*> RA) const;
@@ -857,7 +859,7 @@ namespace rdf {
   private:
     void reset();
 
-    RegisterSet getAliasSet(uint32_t Reg) const;
+    RegisterSet getAliasSet(RegisterId Reg) const;
     RegisterSet getLandingPadLiveIns() const;
 
     NodeAddr<NodeBase*> newNode(uint16_t Attrs);
@@ -966,6 +968,13 @@ namespace rdf {
     return MM;
   }
 
+
+  // Optionally print the lane mask, if it is not ~0.
+  struct PrintLaneMaskOpt {
+    PrintLaneMaskOpt(LaneBitmask M) : Mask(M) {}
+    LaneBitmask Mask;
+  };
+  raw_ostream &operator<< (raw_ostream &OS, const PrintLaneMaskOpt &P);
 
   template <typename T> struct Print;
   template <typename T>

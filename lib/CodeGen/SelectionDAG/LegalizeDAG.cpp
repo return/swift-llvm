@@ -2926,10 +2926,27 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     Results.push_back(Tmp1);
     break;
   case ISD::SIGN_EXTEND_INREG: {
-    // NOTE: we could fall back on load/store here too for targets without
-    // SAR.  However, it is doubtful that any exist.
     EVT ExtraVT = cast<VTSDNode>(Node->getOperand(1))->getVT();
     EVT VT = Node->getValueType(0);
+
+    // An in-register sign-extend of a boolean is a negation:
+    // 'true' (1) sign-extended is -1.
+    // 'false' (0) sign-extended is 0.
+    // However, we must mask the high bits of the source operand because the
+    // SIGN_EXTEND_INREG does not guarantee that the high bits are already zero.
+
+    // TODO: Do this for vectors too?
+    if (ExtraVT.getSizeInBits() == 1) {
+      SDValue One = DAG.getConstant(1, dl, VT);
+      SDValue And = DAG.getNode(ISD::AND, dl, VT, Node->getOperand(0), One);
+      SDValue Zero = DAG.getConstant(0, dl, VT);
+      SDValue Neg = DAG.getNode(ISD::SUB, dl, VT, Zero, And);
+      Results.push_back(Neg);
+      break;
+    }
+
+    // NOTE: we could fall back on load/store here too for targets without
+    // SRA.  However, it is doubtful that any exist.
     EVT ShiftAmountTy = TLI.getShiftAmountTy(VT, DAG.getDataLayout());
     if (VT.isVector())
       ShiftAmountTy = VT;
@@ -4131,6 +4148,10 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
     ReplacedNode(Node);
     break;
   }
+  case ISD::SDIV:
+  case ISD::SREM:
+  case ISD::UDIV:
+  case ISD::UREM:
   case ISD::AND:
   case ISD::OR:
   case ISD::XOR: {
@@ -4140,7 +4161,20 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
       TruncOp = ISD::BITCAST;
     } else {
       assert(OVT.isInteger() && "Cannot promote logic operation");
-      ExtOp   = ISD::ANY_EXTEND;
+
+      switch (Node->getOpcode()) {
+      default:
+        ExtOp = ISD::ANY_EXTEND;
+        break;
+      case ISD::SDIV:
+      case ISD::SREM:
+        ExtOp = ISD::SIGN_EXTEND;
+        break;
+      case ISD::UDIV:
+      case ISD::UREM:
+        ExtOp = ISD::ZERO_EXTEND;
+        break;
+      }
       TruncOp = ISD::TRUNCATE;
     }
     // Promote each of the values to the new type.

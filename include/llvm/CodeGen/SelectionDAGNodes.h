@@ -1123,7 +1123,9 @@ public:
   /// Return the synchronization scope for this memory operation.
   SynchronizationScope getSynchScope() const { return MMO->getSynchScope(); }
 
-  /// Return the atomic ordering requirements for this memory operation.
+  /// Return the atomic ordering requirements for this memory operation. For
+  /// cmpxchg atomic operations, return the atomic ordering requirements when
+  /// store occurs.
   AtomicOrdering getOrdering() const { return MMO->getOrdering(); }
 
   /// Return the type of the in-memory value.
@@ -1202,13 +1204,6 @@ public:
     unsigned Op = getOpcode();
     return Op == ISD::ATOMIC_CMP_SWAP ||
            Op == ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS;
-  }
-
-  /// For cmpxchg atomic operations, return the atomic ordering requirements
-  /// when store occurs.
-  AtomicOrdering getSuccessOrdering() const {
-    assert(isCompareAndSwap() && "Must be cmpxchg operation");
-    return MMO->getSuccessOrdering();
   }
 
   /// For cmpxchg atomic operations, return the atomic ordering requirements
@@ -1401,15 +1396,26 @@ public:
 
 /// Returns true if \p V is a constant integer zero.
 bool isNullConstant(SDValue V);
+
 /// Returns true if \p V is an FP constant with a value of positive zero.
 bool isNullFPConstant(SDValue V);
+
 /// Returns true if \p V is an integer constant with all bits set.
 bool isAllOnesConstant(SDValue V);
+
 /// Returns true if \p V is a constant integer one.
 bool isOneConstant(SDValue V);
+
 /// Returns true if \p V is a bitwise not operation. Assumes that an all ones
 /// constant is canonicalized to be operand 1.
 bool isBitwiseNot(SDValue V);
+
+/// Returns the SDNode if it is a constant splat BuildVector or constant int.
+ConstantSDNode *isConstOrConstSplat(SDValue V);
+
+/// Returns the SDNode if it is a constant splat BuildVector or constant float.
+ConstantFPSDNode *isConstOrConstSplatFP(SDValue V);
+
 
 class GlobalAddressSDNode : public SDNode {
   const GlobalValue *TheGlobal;

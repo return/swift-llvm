@@ -51,10 +51,13 @@ public:
     ISAVersion0_0_0,
     ISAVersion7_0_0,
     ISAVersion7_0_1,
+    ISAVersion7_0_2,
     ISAVersion8_0_0,
     ISAVersion8_0_1,
     ISAVersion8_0_2,
-    ISAVersion8_0_3
+    ISAVersion8_0_3,
+    ISAVersion8_0_4,
+    ISAVersion8_1_0,
   };
 
 protected:
@@ -247,6 +250,10 @@ public:
 
   bool dumpCode() const {
     return DumpCode;
+  }
+
+  bool enableIEEEBit(const MachineFunction &MF) const {
+    return AMDGPU::isCompute(MF.getFunction()->getCallingConv());
   }
 
   /// Return the amount of LDS that can be used that will not restrict the

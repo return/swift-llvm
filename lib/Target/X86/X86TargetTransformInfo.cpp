@@ -140,6 +140,30 @@ int X86TTIImpl::getArithmeticInstrCost(
     return Cost;
   }
 
+  static const CostTblEntry AVX512BWUniformConstCostTable[] = {
+    { ISD::SDIV, MVT::v32i16,  6 }, // vpmulhw sequence
+    { ISD::UDIV, MVT::v32i16,  6 }, // vpmulhuw sequence
+  };
+
+  if (Op2Info == TargetTransformInfo::OK_UniformConstantValue &&
+      ST->hasBWI()) {
+    if (const auto *Entry = CostTableLookup(AVX512BWUniformConstCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
+  static const CostTblEntry AVX512UniformConstCostTable[] = {
+    { ISD::SDIV, MVT::v16i32, 15 }, // vpmuldq sequence
+    { ISD::UDIV, MVT::v16i32, 15 }, // vpmuludq sequence
+  };
+
+  if (Op2Info == TargetTransformInfo::OK_UniformConstantValue &&
+      ST->hasAVX512()) {
+    if (const auto *Entry = CostTableLookup(AVX512UniformConstCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
   static const CostTblEntry AVX2UniformConstCostTable[] = {
     { ISD::SRA,  MVT::v4i64,   4 }, // 2 x psrad + shuffle.
 
@@ -152,6 +176,49 @@ int X86TTIImpl::getArithmeticInstrCost(
   if (Op2Info == TargetTransformInfo::OK_UniformConstantValue &&
       ST->hasAVX2()) {
     if (const auto *Entry = CostTableLookup(AVX2UniformConstCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
+  static const CostTblEntry SSE2UniformConstCostTable[] = {
+    { ISD::SDIV, MVT::v16i16, 12 }, // pmulhw sequence
+    { ISD::SDIV, MVT::v8i16,   6 }, // pmulhw sequence
+    { ISD::UDIV, MVT::v16i16, 12 }, // pmulhuw sequence
+    { ISD::UDIV, MVT::v8i16,   6 }, // pmulhuw sequence
+    { ISD::SDIV, MVT::v8i32,  38 }, // pmuludq sequence
+    { ISD::SDIV, MVT::v4i32,  19 }, // pmuludq sequence
+    { ISD::UDIV, MVT::v8i32,  30 }, // pmuludq sequence
+    { ISD::UDIV, MVT::v4i32,  15 }, // pmuludq sequence
+  };
+
+  if (Op2Info == TargetTransformInfo::OK_UniformConstantValue &&
+      ST->hasSSE2()) {
+    // pmuldq sequence.
+    if (ISD == ISD::SDIV && LT.second == MVT::v8i32 && ST->hasAVX())
+      return LT.first * 30;
+    if (ISD == ISD::SDIV && LT.second == MVT::v4i32 && ST->hasSSE41())
+      return LT.first * 15;
+
+    if (const auto *Entry = CostTableLookup(SSE2UniformConstCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
+  static const CostTblEntry AVX512BWCostTable[] = {
+    // Vectorizing division is a bad idea. See the SSE2 table for more comments.
+    { ISD::SDIV,  MVT::v64i8,  64*20 },
+    { ISD::SDIV,  MVT::v32i16, 32*20 },
+    { ISD::SDIV,  MVT::v16i32, 16*20 },
+    { ISD::SDIV,  MVT::v8i64,  8*20 },
+    { ISD::UDIV,  MVT::v64i8,  64*20 },
+    { ISD::UDIV,  MVT::v32i16, 32*20 },
+    { ISD::UDIV,  MVT::v16i32, 16*20 },
+    { ISD::UDIV,  MVT::v8i64,  8*20 },
+  };
+
+  // Look for AVX512BW lowering tricks for custom cases.
+  if (ST->hasBWI()) {
+    if (const auto *Entry = CostTableLookup(AVX512BWCostTable, ISD,
                                             LT.second))
       return LT.first * Entry->Cost;
   }
@@ -244,7 +311,16 @@ int X86TTIImpl::getArithmeticInstrCost(
     { ISD::SRA,  MVT::v16i16,     10 }, // extend/vpsravd/pack sequence.
     { ISD::SRA,  MVT::v2i64,       4 }, // srl/xor/sub sequence.
     { ISD::SRA,  MVT::v4i64,       4 }, // srl/xor/sub sequence.
+  };
 
+  // Look for AVX2 lowering tricks for custom cases.
+  if (ST->hasAVX2()) {
+    if (const auto *Entry = CostTableLookup(AVX2CustomCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
+  static const CostTblEntry AVXCustomCostTable[] = {
     // Vectorizing division is a bad idea. See the SSE2 table for more comments.
     { ISD::SDIV,  MVT::v32i8,  32*20 },
     { ISD::SDIV,  MVT::v16i16, 16*20 },
@@ -257,20 +333,11 @@ int X86TTIImpl::getArithmeticInstrCost(
   };
 
   // Look for AVX2 lowering tricks for custom cases.
-  if (ST->hasAVX2()) {
-    if (const auto *Entry = CostTableLookup(AVX2CustomCostTable, ISD,
+  if (ST->hasAVX()) {
+    if (const auto *Entry = CostTableLookup(AVXCustomCostTable, ISD,
                                             LT.second))
       return LT.first * Entry->Cost;
   }
-
-  static const CostTblEntry
-  SSE2UniformConstCostTable[] = {
-    // Constant splats are cheaper for the following instructions.
-    { ISD::SDIV, MVT::v8i16,  6 }, // pmulhw sequence
-    { ISD::UDIV, MVT::v8i16,  6 }, // pmulhuw sequence
-    { ISD::SDIV, MVT::v4i32, 19 }, // pmuludq sequence
-    { ISD::UDIV, MVT::v4i32, 15 }, // pmuludq sequence
-  };
 
   static const CostTblEntry
   SSE2UniformCostTable[] = {
@@ -306,14 +373,6 @@ int X86TTIImpl::getArithmeticInstrCost(
   if (ST->hasSSE2() &&
       ((Op2Info == TargetTransformInfo::OK_UniformConstantValue) ||
        (Op2Info == TargetTransformInfo::OK_UniformValue))) {
-    if (Op2Info == TargetTransformInfo::OK_UniformConstantValue) {
-      // pmuldq sequence.
-      if (ISD == ISD::SDIV && LT.second == MVT::v4i32 && ST->hasSSE41())
-        return LT.first * 15;
-      if (const auto *Entry =
-              CostTableLookup(SSE2UniformConstCostTable, ISD, LT.second))
-        return LT.first * Entry->Cost;
-    }
     if (const auto *Entry =
             CostTableLookup(SSE2UniformCostTable, ISD, LT.second))
       return LT.first * Entry->Cost;
@@ -339,6 +398,32 @@ int X86TTIImpl::getArithmeticInstrCost(
     // lowered into a sequence of shuffles and 2 x pmuludq.
     if (VT == MVT::v4i32 && ST->hasSSE2())
       ISD = ISD::MUL;
+  }
+
+  static const CostTblEntry SSE41CostTable[] = {
+    { ISD::SHL,  MVT::v16i8,    11 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v32i8,  2*11 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+
+    { ISD::SRL,  MVT::v16i8,    12 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v32i8,  2*12 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v4i32,    11 }, // Shift each lane + blend.
+    { ISD::SRL,  MVT::v8i32,  2*11 }, // Shift each lane + blend.
+
+    { ISD::SRA,  MVT::v16i8,    24 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v32i8,  2*24 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v4i32,    12 }, // Shift each lane + blend.
+    { ISD::SRA,  MVT::v8i32,  2*12 }, // Shift each lane + blend.
+  };
+
+  if (ST->hasSSE41()) {
+    if (const auto *Entry = CostTableLookup(SSE41CostTable, ISD, LT.second))
+      return LT.first * Entry->Cost;
   }
 
   static const CostTblEntry SSE2CostTable[] = {
@@ -804,6 +889,8 @@ int X86TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) {
     { ISD::UINT_TO_FP, MVT::v4f32, MVT::v4i32, 8 },
     { ISD::UINT_TO_FP, MVT::v2f64, MVT::v2i64, 2*10 },
     { ISD::UINT_TO_FP, MVT::v4f32, MVT::v2i64, 15 },
+
+    { ISD::FP_TO_SINT,  MVT::v2i32,  MVT::v2f64,  3 },
 
     { ISD::ZERO_EXTEND, MVT::v4i16,  MVT::v4i8,   1 },
     { ISD::SIGN_EXTEND, MVT::v4i16,  MVT::v4i8,   6 },
@@ -1705,4 +1792,11 @@ bool X86TTIImpl::areInlineCompatible(const Function *Caller,
   // that we might not care about for inlining, but it is conservatively
   // correct.
   return (CallerBits & CalleeBits) == CalleeBits;
+}
+
+bool X86TTIImpl::enableInterleavedAccessVectorization() {
+  // TODO: We expect this to be beneficial regardless of arch,
+  // but there are currently some unexplained performance artifacts on Atom.
+  // As a temporary solution, disable on Atom.
+  return !(ST->isAtom() || ST->isSLM());
 }

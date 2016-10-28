@@ -29,6 +29,12 @@ using namespace rdf;
 namespace llvm {
 namespace rdf {
 
+raw_ostream &operator<< (raw_ostream &OS, const PrintLaneMaskOpt &P) {
+  if (P.Mask != ~LaneBitmask(0))
+    OS << ':' << PrintLaneMask(P.Mask);
+  return OS;
+}
+
 template<>
 raw_ostream &operator<< (raw_ostream &OS, const Print<RegisterRef> &P) {
   auto &TRI = P.G.getTRI();
@@ -36,8 +42,7 @@ raw_ostream &operator<< (raw_ostream &OS, const Print<RegisterRef> &P) {
     OS << TRI.getName(P.Obj.Reg);
   else
     OS << '#' << P.Obj.Reg;
-  if (P.Obj.Mask != ~LaneBitmask(0))
-    OS << ":" << PrintLaneMask(P.Obj.Mask);
+  OS << PrintLaneMaskOpt(P.Obj.Mask);
   return OS;
 }
 
@@ -625,7 +630,7 @@ bool TargetOperandInfo::isFixedReg(const MachineInstr &In, unsigned OpNum)
   // uses or defs, and those lists do not allow sub-registers.
   if (Op.getSubReg() != 0)
     return false;
-  uint32_t Reg = Op.getReg();
+  RegisterId Reg = Op.getReg();
   const MCPhysReg *ImpR = Op.isDef() ? D.getImplicitDefs()
                                      : D.getImplicitUses();
   if (!ImpR)
@@ -638,7 +643,7 @@ bool TargetOperandInfo::isFixedReg(const MachineInstr &In, unsigned OpNum)
 
 
 RegisterRef RegisterAggr::normalize(RegisterRef RR) const {
-  uint32_t SuperReg = RR.Reg;
+  RegisterId SuperReg = RR.Reg;
   while (true) {
     MCSuperRegIterator SR(SuperReg, &TRI, false);
     if (!SR.isValid())
@@ -701,7 +706,7 @@ RegisterAggr &RegisterAggr::insert(RegisterRef RR) {
 }
 
 RegisterAggr &RegisterAggr::insert(const RegisterAggr &RG) {
-  for (std::pair<uint32_t,LaneBitmask> P : RG.Masks)
+  for (std::pair<RegisterId,LaneBitmask> P : RG.Masks)
     insert(RegisterRef(P.first, P.second));
   return *this;
 }
@@ -719,10 +724,24 @@ RegisterAggr &RegisterAggr::clear(RegisterRef RR) {
   return *this;
 }
 
+RegisterAggr &RegisterAggr::clear(const RegisterAggr &RG) {
+  for (std::pair<RegisterId,LaneBitmask> P : RG.Masks)
+    clear(RegisterRef(P.first, P.second));
+  return *this;
+}
+
+RegisterRef RegisterAggr::clearIn(RegisterRef RR) const {
+  RegisterAggr T(TRI);
+  T.insert(RR).clear(*this);
+  if (T.empty())
+    return RegisterRef();
+  return RegisterRef(T.begin()->first, T.begin()->second);
+}
+
 void RegisterAggr::print(raw_ostream &OS) const {
   OS << '{';
   for (auto I : Masks)
-    OS << ' ' << PrintReg(I.first, &TRI) << ':' << PrintLaneMask(I.second);
+    OS << ' ' << PrintReg(I.first, &TRI) << PrintLaneMaskOpt(I.second);
   OS << " }";
 }
 
@@ -831,7 +850,7 @@ unsigned DataFlowGraph::DefStack::nextDown(unsigned P) const {
 // Register information.
 
 // Get the list of references aliased to RR. Lane masks are ignored.
-RegisterSet DataFlowGraph::getAliasSet(uint32_t Reg) const {
+RegisterSet DataFlowGraph::getAliasSet(RegisterId Reg) const {
   // Do not include RR in the alias set.
   RegisterSet AS;
   assert(TargetRegisterInfo::isPhysicalRegister(Reg));
@@ -847,9 +866,9 @@ RegisterSet DataFlowGraph::getLandingPadLiveIns() const {
   const Constant *PF = F.hasPersonalityFn() ? F.getPersonalityFn()
                                             : nullptr;
   const TargetLowering &TLI = *MF.getSubtarget().getTargetLowering();
-  if (uint32_t R = TLI.getExceptionPointerRegister(PF))
+  if (RegisterId R = TLI.getExceptionPointerRegister(PF))
     LR.insert(RegisterRef(R));
-  if (uint32_t R = TLI.getExceptionSelectorRegister(PF))
+  if (RegisterId R = TLI.getExceptionSelectorRegister(PF))
     LR.insert(RegisterRef(R));
   return LR;
 }
@@ -1049,6 +1068,40 @@ RegisterRef DataFlowGraph::makeRegRef(unsigned Reg, unsigned Sub) const {
   if (Sub != 0)
     Reg = TRI.getSubReg(Reg, Sub);
   return RegisterRef(Reg);
+}
+
+RegisterRef DataFlowGraph::normalizeRef(RegisterRef RR) const {
+  // FIXME copied from RegisterAggr
+  RegisterId SuperReg = RR.Reg;
+  while (true) {
+    MCSuperRegIterator SR(SuperReg, &TRI, false);
+    if (!SR.isValid())
+      break;
+    SuperReg = *SR;
+  }
+
+  uint32_t Sub = TRI.getSubRegIndex(SuperReg, RR.Reg);
+  const TargetRegisterClass &RC = *TRI.getMinimalPhysRegClass(RR.Reg);
+  LaneBitmask SuperMask = RR.Mask &
+                          TRI.composeSubRegIndexLaneMask(Sub, RC.LaneMask);
+  return RegisterRef(SuperReg, SuperMask);
+}
+
+RegisterRef DataFlowGraph::restrictRef(RegisterRef AR, RegisterRef BR) const {
+  if (AR.Reg == BR.Reg) {
+    LaneBitmask M = AR.Mask & BR.Mask;
+    return M ? RegisterRef(AR.Reg, M) : RegisterRef();
+  }
+#ifndef NDEBUG
+  RegisterRef NAR = normalizeRef(AR);
+  RegisterRef NBR = normalizeRef(BR);
+  assert(NAR.Reg != NBR.Reg);
+#endif
+  // This isn't strictly correct, because the overlap may happen in the
+  // part masked out.
+  if (TRI.regsOverlap(AR.Reg, BR.Reg))
+    return AR;
+  return RegisterRef();
 }
 
 // For each stack in the map DefM, push the delimiter for block B on it.

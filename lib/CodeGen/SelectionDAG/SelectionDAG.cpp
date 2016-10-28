@@ -403,7 +403,6 @@ static void AddNodeIDCustom(FoldingSetNodeID &ID, const SDNode *N) {
     ID.AddPointer(GA->getGlobal());
     ID.AddInteger(GA->getOffset());
     ID.AddInteger(GA->getTargetFlags());
-    ID.AddInteger(GA->getAddressSpace());
     break;
   }
   case ISD::BasicBlock:
@@ -1262,7 +1261,6 @@ SDValue SelectionDAG::getGlobalAddress(const GlobalValue *GV, const SDLoc &DL,
   ID.AddPointer(GV);
   ID.AddInteger(Offset);
   ID.AddInteger(TargetFlags);
-  ID.AddInteger(GV->getType()->getAddressSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, DL, IP))
     return SDValue(E, 0);
@@ -1315,7 +1313,9 @@ SDValue SelectionDAG::getConstantPool(const Constant *C, EVT VT,
   assert((TargetFlags == 0 || isTarget) &&
          "Cannot set target flags on target-independent globals");
   if (Alignment == 0)
-    Alignment = getDataLayout().getPrefTypeAlignment(C->getType());
+    Alignment = MF->getFunction()->optForSize()
+                    ? getDataLayout().getABITypeAlignment(C->getType())
+                    : getDataLayout().getPrefTypeAlignment(C->getType());
   unsigned Opc = isTarget ? ISD::TargetConstantPool : ISD::ConstantPool;
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, Opc, getVTList(VT), None);
@@ -1994,6 +1994,18 @@ bool SelectionDAG::MaskedValueIsZero(SDValue Op, const APInt &Mask,
   return (KnownZero & Mask) == Mask;
 }
 
+/// If a SHL/SRA/SRL node has a constant or splat constant shift amount that
+/// is less than the element bit-width of the shift node, return it.
+static const APInt *getValidShiftAmountConstant(SDValue V) {
+  if (ConstantSDNode *SA = isConstOrConstSplat(V.getOperand(1))) {
+    // Shifting more than the bitwidth is not valid.
+    const APInt &ShAmt = SA->getAPIntValue();
+    if (ShAmt.ult(V.getScalarValueSizeInBits()))
+      return &ShAmt;
+  }
+  return nullptr;
+}
+
 /// Determine which bits of Op are known to be either zero or one and return
 /// them in the KnownZero/KnownOne bitsets.
 void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
@@ -2142,58 +2154,34 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
       KnownZero |= APInt::getHighBitsSet(BitWidth, BitWidth - 1);
     break;
   case ISD::SHL:
-    // (shl X, C1) & C2 == 0   iff   (X & C2 >>u C1) == 0
-    if (ConstantSDNode *SA = dyn_cast<ConstantSDNode>(Op.getOperand(1))) {
-      unsigned ShAmt = SA->getZExtValue();
-
-      // If the shift count is an invalid immediate, don't do anything.
-      if (ShAmt >= BitWidth)
-        break;
-
-      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth+1);
-      KnownZero <<= ShAmt;
-      KnownOne  <<= ShAmt;
-      // low bits known zero.
-      KnownZero |= APInt::getLowBitsSet(BitWidth, ShAmt);
+    if (const APInt *ShAmt = getValidShiftAmountConstant(Op)) {
+      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth + 1);
+      KnownZero = KnownZero << *ShAmt;
+      KnownOne = KnownOne << *ShAmt;
+      // Low bits are known zero.
+      KnownZero |= APInt::getLowBitsSet(BitWidth, ShAmt->getZExtValue());
     }
     break;
   case ISD::SRL:
-    // (ushr X, C1) & C2 == 0   iff  (-1 >> C1) & C2 == 0
-    if (ConstantSDNode *SA = dyn_cast<ConstantSDNode>(Op.getOperand(1))) {
-      unsigned ShAmt = SA->getZExtValue();
-
-      // If the shift count is an invalid immediate, don't do anything.
-      if (ShAmt >= BitWidth)
-        break;
-
-      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth+1);
-      KnownZero = KnownZero.lshr(ShAmt);
-      KnownOne  = KnownOne.lshr(ShAmt);
-
-      APInt HighBits = APInt::getHighBitsSet(BitWidth, ShAmt);
-      KnownZero |= HighBits;  // High bits known zero.
+    if (const APInt *ShAmt = getValidShiftAmountConstant(Op)) {
+      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth + 1);
+      KnownZero = KnownZero.lshr(*ShAmt);
+      KnownOne  = KnownOne.lshr(*ShAmt);
+      // High bits are known zero.
+      APInt HighBits = APInt::getHighBitsSet(BitWidth, ShAmt->getZExtValue());
+      KnownZero |= HighBits;
     }
     break;
   case ISD::SRA:
-    if (ConstantSDNode *SA = dyn_cast<ConstantSDNode>(Op.getOperand(1))) {
-      unsigned ShAmt = SA->getZExtValue();
-
-      // If the shift count is an invalid immediate, don't do anything.
-      if (ShAmt >= BitWidth)
-        break;
-
-      // If any of the demanded bits are produced by the sign extension, we also
-      // demand the input sign bit.
-      APInt HighBits = APInt::getHighBitsSet(BitWidth, ShAmt);
-
-      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth+1);
-      KnownZero = KnownZero.lshr(ShAmt);
-      KnownOne  = KnownOne.lshr(ShAmt);
-
-      // Handle the sign bits.
+    if (const APInt *ShAmt = getValidShiftAmountConstant(Op)) {
+      computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth + 1);
+      KnownZero = KnownZero.lshr(*ShAmt);
+      KnownOne  = KnownOne.lshr(*ShAmt);
+      // If we know the value of the sign bit, then we know it is copied across
+      // the high bits by the shift amount.
+      APInt HighBits = APInt::getHighBitsSet(BitWidth, ShAmt->getZExtValue());
       APInt SignBit = APInt::getSignBit(BitWidth);
-      SignBit = SignBit.lshr(ShAmt);  // Adjust to where it is now in the mask.
-
+      SignBit = SignBit.lshr(*ShAmt);  // Adjust to where it is now in the mask.
       if (KnownZero.intersects(SignBit)) {
         KnownZero |= HighBits;  // New bits are known zero.
       } else if (KnownOne.intersects(SignBit)) {
@@ -2435,8 +2423,7 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
   }
   case ISD::EXTRACT_ELEMENT: {
     computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth+1);
-    const unsigned Index =
-      cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+    const unsigned Index = Op.getConstantOperandVal(1);
     const unsigned BitWidth = Op.getValueSizeInBits();
 
     // Remove low part of known bits mask
@@ -2579,17 +2566,18 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
   case ISD::SRA:
     Tmp = ComputeNumSignBits(Op.getOperand(0), Depth+1);
     // SRA X, C   -> adds C sign bits.
-    if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Op.getOperand(1))) {
-      Tmp += C->getZExtValue();
-      if (Tmp > VTBits) Tmp = VTBits;
+    if (ConstantSDNode *C = isConstOrConstSplat(Op.getOperand(1))) {
+      APInt ShiftVal = C->getAPIntValue();
+      ShiftVal += Tmp;
+      Tmp = ShiftVal.uge(VTBits) ? VTBits : ShiftVal.getZExtValue();
     }
     return Tmp;
   case ISD::SHL:
-    if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Op.getOperand(1))) {
+    if (ConstantSDNode *C = isConstOrConstSplat(Op.getOperand(1))) {
       // shl destroys sign bits.
       Tmp = ComputeNumSignBits(Op.getOperand(0), Depth+1);
-      if (C->getZExtValue() >= VTBits ||      // Bad shift.
-          C->getZExtValue() >= Tmp) break;    // Shifted all sign bits out.
+      if (C->getAPIntValue().uge(VTBits) ||      // Bad shift.
+          C->getAPIntValue().uge(Tmp)) break;    // Shifted all sign bits out.
       return Tmp - C->getZExtValue();
     }
     break;
@@ -2695,7 +2683,7 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
     if (Tmp2 == 1) return 1;
 
     // Handle NEG.
-    if (ConstantSDNode *CLHS = dyn_cast<ConstantSDNode>(Op.getOperand(0)))
+    if (ConstantSDNode *CLHS = isConstOrConstSplat(Op.getOperand(0)))
       if (CLHS->isNullValue()) {
         APInt KnownZero, KnownOne;
         computeKnownBits(Op.getOperand(1), KnownZero, KnownOne, Depth+1);
@@ -2728,8 +2716,7 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
 
     // Get reverse index (starting from 1), Op1 value indexes elements from
     // little end. Sign starts at big end.
-    const int rIndex = Items - 1 -
-      cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+    const int rIndex = Items - 1 - Op.getConstantOperandVal(1);
 
     // If the sign portion ends in our element the subtraction gives correct
     // result. Otherwise it gives either negative or > bitwidth result
@@ -6649,6 +6636,40 @@ bool llvm::isOneConstant(SDValue V) {
 
 bool llvm::isBitwiseNot(SDValue V) {
   return V.getOpcode() == ISD::XOR && isAllOnesConstant(V.getOperand(1));
+}
+
+ConstantSDNode *llvm::isConstOrConstSplat(SDValue N) {
+  if (ConstantSDNode *CN = dyn_cast<ConstantSDNode>(N))
+    return CN;
+
+  if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(N)) {
+    BitVector UndefElements;
+    ConstantSDNode *CN = BV->getConstantSplatNode(&UndefElements);
+
+    // BuildVectors can truncate their operands. Ignore that case here.
+    // FIXME: We blindly ignore splats which include undef which is overly
+    // pessimistic.
+    if (CN && UndefElements.none() &&
+        CN->getValueType(0) == N.getValueType().getScalarType())
+      return CN;
+  }
+
+  return nullptr;
+}
+
+ConstantFPSDNode *llvm::isConstOrConstSplatFP(SDValue N) {
+  if (ConstantFPSDNode *CN = dyn_cast<ConstantFPSDNode>(N))
+    return CN;
+
+  if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(N)) {
+    BitVector UndefElements;
+    ConstantFPSDNode *CN = BV->getConstantFPSplatNode(&UndefElements);
+
+    if (CN && UndefElements.none())
+      return CN;
+  }
+
+  return nullptr;
 }
 
 HandleSDNode::~HandleSDNode() {

@@ -2631,8 +2631,9 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
   case AMDGPUISD::MUL_U24:
   case AMDGPUISD::MULHI_I24:
   case AMDGPUISD::MULHI_U24: {
-    simplifyI24(N, 0, DCI);
-    simplifyI24(N, 1, DCI);
+    // If the first call to simplify is successfull, then N may end up being
+    // deleted, so we shouldn't call simplifyI24 again.
+    simplifyI24(N, 0, DCI) || simplifyI24(N, 1, DCI);
     return SDValue();
   }
   case AMDGPUISD::MUL_LOHI_I24:
@@ -2859,10 +2860,9 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
 }
 
 SDValue AMDGPUTargetLowering::getRsqrtEstimate(SDValue Operand,
-                                               DAGCombinerInfo &DCI,
-                                               unsigned &RefinementSteps,
+                                               SelectionDAG &DAG, int Enabled,
+                                               int &RefinementSteps,
                                                bool &UseOneConstNR) const {
-  SelectionDAG &DAG = DCI.DAG;
   EVT VT = Operand.getValueType();
 
   if (VT == MVT::f32) {
@@ -2877,9 +2877,8 @@ SDValue AMDGPUTargetLowering::getRsqrtEstimate(SDValue Operand,
 }
 
 SDValue AMDGPUTargetLowering::getRecipEstimate(SDValue Operand,
-                                               DAGCombinerInfo &DCI,
-                                               unsigned &RefinementSteps) const {
-  SelectionDAG &DAG = DCI.DAG;
+                                               SelectionDAG &DAG, int Enabled,
+                                               int &RefinementSteps) const {
   EVT VT = Operand.getValueType();
 
   if (VT == MVT::f32) {

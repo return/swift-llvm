@@ -233,6 +233,7 @@ SITargetLowering::SITargetLowering(const TargetMachine &TM,
   setTargetDAGCombine(ISD::AND);
   setTargetDAGCombine(ISD::OR);
   setTargetDAGCombine(ISD::XOR);
+  setTargetDAGCombine(ISD::SINT_TO_FP);
   setTargetDAGCombine(ISD::UINT_TO_FP);
   setTargetDAGCombine(ISD::FCANONICALIZE);
 
@@ -586,24 +587,32 @@ SDValue SITargetLowering::LowerParameter(SelectionDAG &DAG, EVT VT, EVT MemVT,
                                          const SDLoc &SL, SDValue Chain,
                                          unsigned Offset, bool Signed) const {
   const DataLayout &DL = DAG.getDataLayout();
-  Type *Ty = VT.getTypeForEVT(*DAG.getContext());
-  MVT PtrVT = getPointerTy(DL, AMDGPUAS::CONSTANT_ADDRESS);
+  Type *Ty = MemVT.getTypeForEVT(*DAG.getContext());
   PointerType *PtrTy = PointerType::get(Ty, AMDGPUAS::CONSTANT_ADDRESS);
-  SDValue PtrOffset = DAG.getUNDEF(PtrVT);
   MachinePointerInfo PtrInfo(UndefValue::get(PtrTy));
 
   unsigned Align = DL.getABITypeAlignment(Ty);
 
-  ISD::LoadExtType ExtTy = Signed ? ISD::SEXTLOAD : ISD::ZEXTLOAD;
-  if (MemVT.isFloatingPoint())
-    ExtTy = ISD::EXTLOAD;
-
   SDValue Ptr = LowerParameterPtr(DAG, SL, Chain, Offset);
-  return DAG.getLoad(ISD::UNINDEXED, ExtTy, VT, SL, Chain, Ptr, PtrOffset,
-                     PtrInfo, MemVT, Align,
-                     MachineMemOperand::MONonTemporal |
-                         MachineMemOperand::MODereferenceable |
-                         MachineMemOperand::MOInvariant);
+  SDValue Load = DAG.getLoad(MemVT, SL, Chain, Ptr, PtrInfo, Align,
+                             MachineMemOperand::MONonTemporal |
+                             MachineMemOperand::MODereferenceable |
+                             MachineMemOperand::MOInvariant);
+
+  SDValue Val;
+  if (MemVT.isFloatingPoint())
+    Val = DAG.getNode(ISD::FP_EXTEND, SL, VT, Load);
+  else if (Signed)
+    Val = DAG.getSExtOrTrunc(Load, SL, VT);
+  else
+    Val = DAG.getZExtOrTrunc(Load, SL, VT);
+
+  SDValue Ops[] = {
+    Val,
+    Load.getValue(1)
+  };
+
+  return DAG.getMergeValues(Ops, SL);
 }
 
 SDValue SITargetLowering::LowerFormalArguments(
@@ -1442,6 +1451,23 @@ static MachineBasicBlock *emitIndirectSrc(MachineInstr &MI,
   return LoopBB;
 }
 
+static unsigned getMOVRELDPseudo(const TargetRegisterClass *VecRC) {
+  switch (VecRC->getSize()) {
+  case 4:
+    return AMDGPU::V_MOVRELD_B32_V1;
+  case 8:
+    return AMDGPU::V_MOVRELD_B32_V2;
+  case 16:
+    return AMDGPU::V_MOVRELD_B32_V4;
+  case 32:
+    return AMDGPU::V_MOVRELD_B32_V8;
+  case 64:
+    return AMDGPU::V_MOVRELD_B32_V16;
+  default:
+    llvm_unreachable("unsupported size for MOVRELD pseudos");
+  }
+}
+
 static MachineBasicBlock *emitIndirectDst(MachineInstr &MI,
                                           MachineBasicBlock &MBB,
                                           const SISubtarget &ST) {
@@ -1495,20 +1521,13 @@ static MachineBasicBlock *emitIndirectDst(MachineInstr &MI,
 
       BuildMI(MBB, I, DL, TII->get(AMDGPU::S_SET_GPR_IDX_OFF));
     } else {
-      const MCInstrDesc &MovRelDesc = TII->get(AMDGPU::V_MOVRELD_B32_e32);
+      const MCInstrDesc &MovRelDesc = TII->get(getMOVRELDPseudo(VecRC));
 
-      MachineInstr *MovRel =
-        BuildMI(MBB, I, DL, MovRelDesc)
-        .addReg(SrcVec->getReg(), RegState::Undef, SubReg) // vdst
-        .addOperand(*Val)
-        .addReg(Dst, RegState::ImplicitDefine)
-        .addReg(SrcVec->getReg(), RegState::Implicit);
-
-      const int ImpDefIdx = MovRelDesc.getNumOperands() +
-        MovRelDesc.getNumImplicitUses();
-      const int ImpUseIdx = ImpDefIdx + 1;
-
-      MovRel->tieOperands(ImpDefIdx, ImpUseIdx);
+      BuildMI(MBB, I, DL, MovRelDesc)
+          .addReg(Dst, RegState::Define)
+          .addReg(SrcVec->getReg())
+          .addOperand(*Val)
+          .addImm(SubReg - AMDGPU::sub0);
     }
 
     MI.eraseFromParent();
@@ -1546,20 +1565,13 @@ static MachineBasicBlock *emitIndirectDst(MachineInstr &MI,
       .addReg(PhiReg, RegState::Implicit)
       .addReg(AMDGPU::M0, RegState::Implicit);
   } else {
-    const MCInstrDesc &MovRelDesc = TII->get(AMDGPU::V_MOVRELD_B32_e32);
-    // vdst is not actually read and just provides the base register index.
-    MachineInstr *MovRel =
-      BuildMI(*LoopBB, InsPt, DL, MovRelDesc)
-    .addReg(PhiReg, RegState::Undef, SubReg) // vdst
-    .addOperand(*Val)
-    .addReg(Dst, RegState::ImplicitDefine)
-    .addReg(PhiReg, RegState::Implicit);
+    const MCInstrDesc &MovRelDesc = TII->get(getMOVRELDPseudo(VecRC));
 
-    const int ImpDefIdx = MovRelDesc.getNumOperands() +
-      MovRelDesc.getNumImplicitUses();
-    const int ImpUseIdx = ImpDefIdx + 1;
-
-    MovRel->tieOperands(ImpDefIdx, ImpUseIdx);
+    BuildMI(*LoopBB, InsPt, DL, MovRelDesc)
+        .addReg(Dst, RegState::Define)
+        .addReg(PhiReg)
+        .addOperand(*Val)
+        .addImm(SubReg - AMDGPU::sub0);
   }
 
   MI.eraseFromParent();
@@ -1805,6 +1817,23 @@ void SITargetLowering::createDebuggerPrologueStackObjects(
   }
 }
 
+bool SITargetLowering::shouldEmitFixup(const GlobalValue *GV) const {
+  const Triple &TT = getTargetMachine().getTargetTriple();
+  return GV->getType()->getAddressSpace() == AMDGPUAS::CONSTANT_ADDRESS &&
+         AMDGPU::shouldEmitConstantsToTextSection(TT);
+}
+
+bool SITargetLowering::shouldEmitGOTReloc(const GlobalValue *GV) const {
+  return (GV->getType()->getAddressSpace() == AMDGPUAS::GLOBAL_ADDRESS ||
+              GV->getType()->getAddressSpace() == AMDGPUAS::CONSTANT_ADDRESS) &&
+         !shouldEmitFixup(GV) &&
+         !getTargetMachine().shouldAssumeDSOLocal(*GV->getParent(), GV);
+}
+
+bool SITargetLowering::shouldEmitPCReloc(const GlobalValue *GV) const {
+  return !shouldEmitFixup(GV) && !shouldEmitGOTReloc(GV);
+}
+
 /// This transforms the control flow intrinsics to get the branch destination as
 /// last parameter, also switches branch target with BR if the need arise
 SDValue SITargetLowering::LowerBRCOND(SDValue BRCOND,
@@ -1989,29 +2018,12 @@ SDValue SITargetLowering::lowerADDRSPACECAST(SDValue Op,
   return DAG.getUNDEF(ASC->getValueType(0));
 }
 
-static bool shouldEmitFixup(const GlobalValue *GV,
-                            const TargetMachine &TM) {
-  // FIXME: We need to emit global variables in constant address space in a
-  // separate section, and use relocations.
-  return GV->getType()->getAddressSpace() == AMDGPUAS::CONSTANT_ADDRESS;
-}
-
-static bool shouldEmitGOTReloc(const GlobalValue *GV,
-                               const TargetMachine &TM) {
-  return GV->getType()->getAddressSpace() == AMDGPUAS::GLOBAL_ADDRESS &&
-         !TM.shouldAssumeDSOLocal(*GV->getParent(), GV);
-}
-
-static bool shouldEmitPCReloc(const GlobalValue *GV,
-                              const TargetMachine &TM) {
-  return !shouldEmitFixup(GV, TM) && !shouldEmitGOTReloc(GV, TM);
-}
-
 bool
 SITargetLowering::isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const {
   // We can fold offsets for anything that doesn't require a GOT relocation.
-  return GA->getAddressSpace() == AMDGPUAS::GLOBAL_ADDRESS &&
-         !shouldEmitGOTReloc(GA->getGlobal(), getTargetMachine());
+  return (GA->getAddressSpace() == AMDGPUAS::GLOBAL_ADDRESS ||
+              GA->getAddressSpace() == AMDGPUAS::CONSTANT_ADDRESS) &&
+         !shouldEmitGOTReloc(GA->getGlobal());
 }
 
 static SDValue buildPCRelGlobalAddress(SelectionDAG &DAG, const GlobalValue *GV,
@@ -2068,9 +2080,9 @@ SDValue SITargetLowering::LowerGlobalAddress(AMDGPUMachineFunction *MFI,
   const GlobalValue *GV = GSD->getGlobal();
   EVT PtrVT = Op.getValueType();
 
-  if (shouldEmitFixup(GV, getTargetMachine()))
+  if (shouldEmitFixup(GV))
     return buildPCRelGlobalAddress(DAG, GV, DL, GSD->getOffset(), PtrVT);
-  else if (shouldEmitPCReloc(GV, getTargetMachine()))
+  else if (shouldEmitPCReloc(GV))
     return buildPCRelGlobalAddress(DAG, GV, DL, GSD->getOffset(), PtrVT,
                                    SIInstrInfo::MO_REL32);
 
@@ -2579,6 +2591,14 @@ SDValue SITargetLowering::LowerLOAD(SDValue Op, SelectionDAG &DAG) const {
     return DAG.getMergeValues(Ops, DL);
   }
 
+  MachineFunction &MF = DAG.getMachineFunction();
+  SIMachineFunctionInfo *MFI = MF.getInfo<SIMachineFunctionInfo>();
+  // If there is a possibilty that flat instruction access scratch memory
+  // then we need to use the same legalization rules we use for private.
+  if (AS == AMDGPUAS::FLAT_ADDRESS)
+    AS = MFI->hasFlatScratchInit() ?
+         AMDGPUAS::PRIVATE_ADDRESS : AMDGPUAS::GLOBAL_ADDRESS;
+
   unsigned NumElements = MemVT.getVectorNumElements();
   switch (AS) {
   case AMDGPUAS::CONSTANT_ADDRESS:
@@ -2877,6 +2897,14 @@ SDValue SITargetLowering::LowerSTORE(SDValue Op, SelectionDAG &DAG) const {
                           AS, Store->getAlignment())) {
     return expandUnalignedStore(Store, DAG);
   }
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  SIMachineFunctionInfo *MFI = MF.getInfo<SIMachineFunctionInfo>();
+  // If there is a possibilty that flat instruction access scratch memory
+  // then we need to use the same legalization rules we use for private.
+  if (AS == AMDGPUAS::FLAT_ADDRESS)
+    AS = MFI->hasFlatScratchInit() ?
+         AMDGPUAS::PRIVATE_ADDRESS : AMDGPUAS::GLOBAL_ADDRESS;
 
   unsigned NumElements = VT.getVectorNumElements();
   switch (AS) {
@@ -3512,19 +3540,27 @@ SDValue SITargetLowering::PerformDAGCombine(SDNode *N,
   case AMDGPUISD::CVT_F32_UBYTE2:
   case AMDGPUISD::CVT_F32_UBYTE3: {
     unsigned Offset = N->getOpcode() - AMDGPUISD::CVT_F32_UBYTE0;
+
     SDValue Src = N->getOperand(0);
+    SDValue Srl = N->getOperand(0);
+    if (Srl.getOpcode() == ISD::ZERO_EXTEND)
+      Srl = Srl.getOperand(0);
 
     // TODO: Handle (or x, (srl y, 8)) pattern when known bits are zero.
-    if (Src.getOpcode() == ISD::SRL) {
+    if (Srl.getOpcode() == ISD::SRL) {
       // cvt_f32_ubyte0 (srl x, 16) -> cvt_f32_ubyte2 x
       // cvt_f32_ubyte1 (srl x, 16) -> cvt_f32_ubyte3 x
       // cvt_f32_ubyte0 (srl x, 8) -> cvt_f32_ubyte1 x
 
-      if (const ConstantSDNode *C = dyn_cast<ConstantSDNode>(Src.getOperand(1))) {
+      if (const ConstantSDNode *C =
+              dyn_cast<ConstantSDNode>(Srl.getOperand(1))) {
+        Srl = DAG.getZExtOrTrunc(Srl.getOperand(0), SDLoc(Srl.getOperand(0)),
+                                 EVT(MVT::i32));
+
         unsigned SrcOffset = C->getZExtValue() + 8 * Offset;
         if (SrcOffset < 32 && SrcOffset % 8 == 0) {
           return DAG.getNode(AMDGPUISD::CVT_F32_UBYTE0 + SrcOffset / 8, DL,
-                             MVT::f32, Src.getOperand(0));
+                             MVT::f32, Srl);
         }
       }
     }
@@ -3542,7 +3578,7 @@ SDValue SITargetLowering::PerformDAGCombine(SDNode *N,
 
     break;
   }
-
+  case ISD::SINT_TO_FP:
   case ISD::UINT_TO_FP: {
     return performUCharToFloatCombine(N, DCI);
   }

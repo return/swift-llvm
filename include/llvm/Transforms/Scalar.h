@@ -472,6 +472,13 @@ ModulePass *createRewriteStatepointsForGCPass();
 
 //===----------------------------------------------------------------------===//
 //
+// StripGCRelocates - Remove GC relocates that have been inserted by
+// RewriteStatepointsForGC. The resulting IR is incorrect, but this is useful
+// for manual inspection.
+FunctionPass *createStripGCRelocatesPass();
+
+//===----------------------------------------------------------------------===//
+//
 // Float2Int - Demote floats to ints where possible.
 //
 FunctionPass *createFloat2IntPass();
@@ -519,6 +526,12 @@ FunctionPass *createLoopDataPrefetchPass();
 ///===---------------------------------------------------------------------===//
 ModulePass *createNameAnonGlobalPass();
 
+//===----------------------------------------------------------------------===//
+//
+// LibCallsShrinkWrap - Shrink-wraps a call to function if the result is not
+// used.
+//
+FunctionPass *createLibCallsShrinkWrapPass();
 } // End llvm namespace
 
 #endif
