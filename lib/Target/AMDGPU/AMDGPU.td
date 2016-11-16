@@ -153,6 +153,12 @@ def FeatureSMemRealTime : SubtargetFeature<"s-memrealtime",
   "Has s_memrealtime instruction"
 >;
 
+def FeatureInv2PiInlineImm : SubtargetFeature<"inv-2pi-inline-imm",
+  "HasInv2PiInlineImm",
+  "true",
+  "Has 1 / (2 * pi) as inline immediate"
+>;
+
 def Feature16BitInsts : SubtargetFeature<"16-bit-insts",
   "Has16BitInsts",
   "true",
@@ -171,9 +177,21 @@ def FeatureVGPRIndexMode : SubtargetFeature<"vgpr-index-mode",
   "Has VGPR mode register indexing"
 >;
 
+def FeatureScalarStores : SubtargetFeature<"scalar-stores",
+  "HasScalarStores",
+  "true",
+  "Has store scalar memory instructions"
+>;
+
 //===------------------------------------------------------------===//
 // Subtarget Features (options and debugging)
 //===------------------------------------------------------------===//
+
+def FeatureFP16Denormals : SubtargetFeature<"fp16-denormals",
+  "FP16Denormals",
+  "true",
+  "Enable half precision denormal handling"
+>;
 
 // Some instructions do not support denormals despite this flag. Using
 // fp32 denormals also causes instructions to run at the double
@@ -311,7 +329,8 @@ def FeatureVolcanicIslands : SubtargetFeatureGeneration<"VOLCANIC_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize65536,
    FeatureWavefrontSize64, FeatureFlatAddressSpace, FeatureGCN,
    FeatureGCN3Encoding, FeatureCIInsts, Feature16BitInsts,
-   FeatureSMemRealTime, FeatureVGPRIndexMode, FeatureMovrel
+   FeatureSMemRealTime, FeatureVGPRIndexMode, FeatureMovrel,
+   FeatureScalarStores, FeatureInv2PiInlineImm
   ]
 >;
 
@@ -325,44 +344,44 @@ class SubtargetFeatureISAVersion <int Major, int Minor, int Stepping,
   Implies
 >;
 
-def FeatureISAVersion7_0_0 : SubtargetFeatureISAVersion <7,0,0, 
+def FeatureISAVersion7_0_0 : SubtargetFeatureISAVersion <7,0,0,
   [FeatureSeaIslands,
    FeatureLDSBankCount32]>;
-   
+
 def FeatureISAVersion7_0_1 : SubtargetFeatureISAVersion <7,0,1,
   [FeatureSeaIslands,
    HalfRate64Ops,
    FeatureLDSBankCount32,
    FeatureFastFMAF32]>;
-   
+
 def FeatureISAVersion7_0_2 : SubtargetFeatureISAVersion <7,0,2,
   [FeatureSeaIslands,
    FeatureLDSBankCount16,
    FeatureXNACK]>;
-   
+
 def FeatureISAVersion8_0_0 : SubtargetFeatureISAVersion <8,0,0,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount32,
    FeatureSGPRInitBug]>;
-   
+
 def FeatureISAVersion8_0_1 : SubtargetFeatureISAVersion <8,0,1,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount32,
    FeatureXNACK]>;
-   
+
 def FeatureISAVersion8_0_2 : SubtargetFeatureISAVersion <8,0,2,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount32,
    FeatureSGPRInitBug]>;
-   
+
 def FeatureISAVersion8_0_3 : SubtargetFeatureISAVersion <8,0,3,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount32]>;
-   
+
 def FeatureISAVersion8_0_4 : SubtargetFeatureISAVersion <8,0,4,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount32]>;
-   
+
 def FeatureISAVersion8_1_0 : SubtargetFeatureISAVersion <8,1,0,
   [FeatureVolcanicIslands,
    FeatureLDSBankCount16,
@@ -479,6 +498,8 @@ def isCIVI : Predicate <
 >, AssemblerPredicate<"FeatureCIInsts">;
 
 def HasFlatAddressSpace : Predicate<"Subtarget->hasFlatAddressSpace()">;
+
+def Has16BitInsts : Predicate<"Subtarget->has16BitInsts()">;
 
 class PredicateControl {
   Predicate SubtargetPredicate;

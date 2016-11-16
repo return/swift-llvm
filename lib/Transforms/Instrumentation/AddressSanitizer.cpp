@@ -638,7 +638,7 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
   ShadowMapping Mapping;
 
   SmallVector<AllocaInst *, 16> AllocaVec;
-  SmallSetVector<AllocaInst *, 16> NonInstrumentedStaticAllocaVec;
+  SmallVector<AllocaInst *, 16> StaticAllocasToMoveUp;
   SmallVector<Instruction *, 8> RetVec;
   unsigned StackAlignment;
 
@@ -766,7 +766,14 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
   /// \brief Collect Alloca instructions we want (and can) handle.
   void visitAllocaInst(AllocaInst &AI) {
     if (!ASan.isInterestingAlloca(AI)) {
-      if (AI.isStaticAlloca()) NonInstrumentedStaticAllocaVec.insert(&AI);
+      if (AI.isStaticAlloca()) {
+        // Skip over allocas that are present *before* the first instrumented
+        // alloca, we don't want to move those around.
+        if (AllocaVec.empty())
+          return;
+
+        StaticAllocasToMoveUp.push_back(&AI);
+      }
       return;
     }
 
@@ -1535,6 +1542,14 @@ bool AddressSanitizerModule::InstrumentGlobals(IRBuilder<> &IRB, Module &M) {
     NewGlobal->copyAttributesFrom(G);
     NewGlobal->setAlignment(MinRZ);
 
+    // Move null-terminated C strings to "__asan_cstring" section on Darwin.
+    if (TargetTriple.isOSBinFormatMachO() && !G->hasSection() &&
+        G->isConstant()) {
+      auto Seq = dyn_cast<ConstantDataSequential>(G->getInitializer());
+      if (Seq && Seq->isCString())
+        NewGlobal->setSection("__TEXT,__asan_cstring,regular");
+    }
+
     // Transfer the debug info.  The payload starts at offset zero so we can
     // copy the debug info over as is.
     SmallVector<DIGlobalVariable *, 1> GVs;
@@ -2223,10 +2238,9 @@ void FunctionStackPoisoner::processStaticAllocas() {
   // regular stack slots.
   auto InsBeforeB = InsBefore->getParent();
   assert(InsBeforeB == &F.getEntryBlock());
-  for (BasicBlock::iterator I(InsBefore); I != InsBeforeB->end(); ++I)
-    if (auto *AI = dyn_cast<AllocaInst>(I))
-      if (NonInstrumentedStaticAllocaVec.count(AI) > 0)
-        AI->moveBefore(InsBefore);
+  for (auto *AI : StaticAllocasToMoveUp)
+    if (AI->getParent() == InsBeforeB)
+      AI->moveBefore(InsBefore);
 
   // If we have a call to llvm.localescape, keep it in the entry block.
   if (LocalEscapeCall) LocalEscapeCall->moveBefore(InsBefore);

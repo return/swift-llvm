@@ -75,6 +75,7 @@ protected:
   bool HalfRate64Ops;
 
   // Dynamially set bits that enable features.
+  bool FP16Denormals;
   bool FP32Denormals;
   bool FP64Denormals;
   bool FPExceptions;
@@ -105,6 +106,8 @@ protected:
   bool Has16BitInsts;
   bool HasMovrel;
   bool HasVGPRIndexMode;
+  bool HasScalarStores;
+  bool HasInv2PiInlineImm;
   bool FlatAddressSpace;
   bool R600ALUInst;
   bool CaymanISA;
@@ -171,6 +174,10 @@ public:
 
   unsigned getMaxPrivateElementSize() const {
     return MaxPrivateElementSize;
+  }
+
+  bool has16BitInsts() const {
+    return Has16BitInsts;
   }
 
   bool hasHWFP64() const {
@@ -264,6 +271,9 @@ public:
   /// the given LDS memory size is the only constraint.
   unsigned getOccupancyWithLocalMemSize(uint32_t Bytes) const;
 
+  bool hasFP16Denormals() const {
+    return FP16Denormals;
+  }
 
   bool hasFP32Denormals() const {
     return FP32Denormals;
@@ -511,10 +521,6 @@ public:
     return HasSMemRealTime;
   }
 
-  bool has16BitInsts() const {
-    return Has16BitInsts;
-  }
-
   bool hasMovrel() const {
     return HasMovrel;
   }
@@ -525,6 +531,14 @@ public:
 
   bool hasScalarCompareEq64() const {
     return getGeneration() >= VOLCANIC_ISLANDS;
+  }
+
+  bool hasScalarStores() const {
+    return HasScalarStores;
+  }
+
+  bool hasInv2PiInlineImm() const {
+    return HasInv2PiInlineImm;
   }
 
   bool enableSIScheduler() const {
@@ -556,6 +570,10 @@ public:
     return SGPRInitBug;
   }
 
+  bool has12DWordStoreHazard() const {
+    return getGeneration() != AMDGPUSubtarget::SOUTHERN_ISLANDS;
+  }
+
   unsigned getKernArgSegmentSize(unsigned ExplictArgBytes) const;
 
   /// Return the maximum number of waves per SIMD for kernels using \p SGPRs SGPRs
@@ -569,6 +587,8 @@ public:
   bool needWaitcntBeforeBarrier() const {
     return true;
   }
+
+  unsigned getMaxNumSGPRs() const;
 };
 
 } // End namespace llvm

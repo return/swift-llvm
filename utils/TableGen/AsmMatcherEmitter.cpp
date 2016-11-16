@@ -97,6 +97,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenTarget.h"
+#include "SubtargetFeatureInfo.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/STLExtras.h"
@@ -127,7 +128,6 @@ MatchPrefix("match-prefix", cl::init(""),
 
 namespace {
 class AsmMatcherInfo;
-struct SubtargetFeatureInfo;
 
 // Register sets are used as keys in some second-order sets TableGen creates
 // when generating its data structures. This means that the order of two
@@ -652,28 +652,6 @@ private:
   void addAsmOperand(StringRef Token, bool IsIsolatedToken = false);
 };
 
-/// SubtargetFeatureInfo - Helper class for storing information on a subtarget
-/// feature which participates in instruction matching.
-struct SubtargetFeatureInfo {
-  /// \brief The predicate record for this feature.
-  Record *TheDef;
-
-  /// \brief An unique index assigned to represent this feature.
-  uint64_t Index;
-
-  SubtargetFeatureInfo(Record *D, uint64_t Idx) : TheDef(D), Index(Idx) {}
-
-  /// \brief The name of the enumerated constant identifying this feature.
-  std::string getEnumName() const {
-    return "Feature_" + TheDef->getName();
-  }
-
-  void dump() const {
-    errs() << getEnumName() << " " << Index << "\n";
-    TheDef->dump();
-  }
-};
-
 struct OperandMatchEntry {
   unsigned OperandMask;
   const MatchableInfo* MI;
@@ -753,7 +731,7 @@ public:
                  CodeGenTarget &Target,
                  RecordKeeper &Records);
 
-  /// buildInfo - Construct the various tables used during matching.
+  /// Construct the various tables used during matching.
   void buildInfo();
 
   /// buildOperandMatchInfo - Build the necessary information to handle user
@@ -1436,21 +1414,15 @@ void AsmMatcherInfo::buildOperandMatchInfo() {
 
 void AsmMatcherInfo::buildInfo() {
   // Build information about all of the AssemblerPredicates.
-  std::vector<Record*> AllPredicates =
-    Records.getAllDerivedDefinitions("Predicate");
-  for (Record *Pred : AllPredicates) {
-    // Ignore predicates that are not intended for the assembler.
-    if (!Pred->getValueAsBit("AssemblerMatcherPredicate"))
-      continue;
-
-    if (Pred->getName().empty())
-      PrintFatalError(Pred->getLoc(), "Predicate has no name!");
-
-    SubtargetFeatures.insert(std::make_pair(
-        Pred, SubtargetFeatureInfo(Pred, SubtargetFeatures.size())));
-    DEBUG(SubtargetFeatures.find(Pred)->second.dump());
-    assert(SubtargetFeatures.size() <= 64 && "Too many subtarget features!");
-  }
+  const std::vector<std::pair<Record *, SubtargetFeatureInfo>>
+      &SubtargetFeaturePairs = SubtargetFeatureInfo::getAll(Records);
+  SubtargetFeatures.insert(SubtargetFeaturePairs.begin(),
+                           SubtargetFeaturePairs.end());
+#ifndef NDEBUG
+  for (const auto &Pair : SubtargetFeatures)
+    DEBUG(Pair.second.dump());
+#endif // NDEBUG
+  assert(SubtargetFeatures.size() <= 64 && "Too many subtarget features!");
 
   bool HasMnemonicFirst = AsmParser->getValueAsBit("HasMnemonicFirst");
 
@@ -2465,55 +2437,6 @@ static void emitGetSubtargetFeatureName(AsmMatcherInfo &Info, raw_ostream &OS) {
   OS << "}\n\n";
 }
 
-/// emitComputeAvailableFeatures - Emit the function to compute the list of
-/// available features given a subtarget.
-static void emitComputeAvailableFeatures(AsmMatcherInfo &Info,
-                                         raw_ostream &OS) {
-  std::string ClassName =
-    Info.AsmParser->getValueAsString("AsmParserClassName");
-
-  OS << "uint64_t " << Info.Target.getName() << ClassName << "::\n"
-     << "ComputeAvailableFeatures(const FeatureBitset& FB) const {\n";
-  OS << "  uint64_t Features = 0;\n";
-  for (const auto &SF : Info.SubtargetFeatures) {
-    const SubtargetFeatureInfo &SFI = SF.second;
-
-    OS << "  if (";
-    std::string CondStorage =
-      SFI.TheDef->getValueAsString("AssemblerCondString");
-    StringRef Conds = CondStorage;
-    std::pair<StringRef,StringRef> Comma = Conds.split(',');
-    bool First = true;
-    do {
-      if (!First)
-        OS << " && ";
-
-      bool Neg = false;
-      StringRef Cond = Comma.first;
-      if (Cond[0] == '!') {
-        Neg = true;
-        Cond = Cond.substr(1);
-      }
-
-      OS << "(";
-      if (Neg)
-        OS << "!";
-      OS << "FB[" << Info.Target.getName() << "::" << Cond << "])";
-
-      if (Comma.second.empty())
-        break;
-
-      First = false;
-      Comma = Comma.second.split(',');
-    } while (true);
-
-    OS << ")\n";
-    OS << "    Features |= " << SFI.getEnumName() << ";\n";
-  }
-  OS << "  return Features;\n";
-  OS << "}\n\n";
-}
-
 static std::string GetAliasRequiredFeatures(Record *R,
                                             const AsmMatcherInfo &Info) {
   std::vector<Record*> ReqFeatures = R->getValueAsListOfDefs("Predicates");
@@ -2728,8 +2651,7 @@ static void emitCustomOperandParsing(raw_ostream &OS, CodeGenTarget &Target,
 
   // Emit the operand class switch to call the correct custom parser for
   // the found operand class.
-  OS << Target.getName() << ClassName << "::OperandMatchResultTy "
-     << Target.getName() << ClassName << "::\n"
+  OS << "OperandMatchResultTy " << Target.getName() << ClassName << "::\n"
      << "tryCustomParseOperand(OperandVector"
      << " &Operands,\n                      unsigned MCK) {\n\n"
      << "  switch(MCK) {\n";
@@ -2750,8 +2672,7 @@ static void emitCustomOperandParsing(raw_ostream &OS, CodeGenTarget &Target,
   // Emit the static custom operand parser. This code is very similar with
   // the other matcher. Also use MatchResultTy here just in case we go for
   // a better error handling.
-  OS << Target.getName() << ClassName << "::OperandMatchResultTy "
-     << Target.getName() << ClassName << "::\n"
+  OS << "OperandMatchResultTy " << Target.getName() << ClassName << "::\n"
      << "MatchOperandParserImpl(OperandVector"
      << " &Operands,\n                       StringRef Mnemonic) {\n";
 
@@ -2905,11 +2826,6 @@ void AsmMatcherEmitter::run(raw_ostream &OS) {
      << "                                unsigned VariantID = 0);\n";
 
   if (!Info.OperandMatchInfo.empty()) {
-    OS << "\n  enum OperandMatchResultTy {\n";
-    OS << "    MatchOperand_Success,    // operand matched successfully\n";
-    OS << "    MatchOperand_NoMatch,    // operand did not match\n";
-    OS << "    MatchOperand_ParseFail   // operand matched but had errors\n";
-    OS << "  };\n";
     OS << "  OperandMatchResultTy MatchOperandParserImpl(\n";
     OS << "    OperandVector &Operands,\n";
     OS << "    StringRef Mnemonic);\n";
@@ -2976,7 +2892,8 @@ void AsmMatcherEmitter::run(raw_ostream &OS) {
   emitValidateOperandClass(Info, OS);
 
   // Emit the available features compute function.
-  emitComputeAvailableFeatures(Info, OS);
+  SubtargetFeatureInfo::emitComputeAvailableFeatures(
+      Info.Target.getName(), ClassName, Info.SubtargetFeatures, OS);
 
   StringToOffsetTable StringTable;
 

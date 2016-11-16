@@ -450,10 +450,11 @@ namespace {
     /// This is a helper function for MergeConsecutiveStores. When the source
     /// elements of the consecutive stores are all constants or all extracted
     /// vector elements, try to merge them into one larger store.
-    /// \return True if a merged store was created.
-    bool MergeStoresOfConstantsOrVecElts(SmallVectorImpl<MemOpLink> &StoreNodes,
-                                         EVT MemVT, unsigned NumStores,
-                                         bool IsConstantSrc, bool UseVector);
+    /// \return number of stores that were merged into a merged store (always
+    /// a prefix of \p StoreNode).
+    bool MergeStoresOfConstantsOrVecElts(
+        SmallVectorImpl<MemOpLink> &StoreNodes, EVT MemVT, unsigned NumStores,
+        bool IsConstantSrc, bool UseVector);
 
     /// This is a helper function for MergeConsecutiveStores.
     /// Stores that may be merged are placed in StoreNodes.
@@ -470,8 +471,10 @@ namespace {
 
     /// Merge consecutive store operations into a wide store.
     /// This optimization uses wide integers or vectors when possible.
-    /// \return True if some memory operations were changed.
-    bool MergeConsecutiveStores(StoreSDNode *N);
+    /// \return number of stores that were merged into a merged store (the
+    /// affected nodes are stored as a prefix in \p StoreNodes).
+    bool MergeConsecutiveStores(StoreSDNode *N,
+                                SmallVectorImpl<MemOpLink> &StoreNodes);
 
     /// \brief Try to transform a truncation where C is a constant:
     ///     (trunc (and X, C)) -> (and (trunc X), (trunc C))
@@ -3046,6 +3049,11 @@ SDValue DAGCombiner::visitANDLike(SDValue N0, SDValue N1,
         unsigned Size = VT.getSizeInBits();
         const APInt &AndMask = CAnd->getAPIntValue();
         unsigned ShiftBits = CShift->getZExtValue();
+
+        // Bail out, this node will probably disappear anyway.
+        if (ShiftBits == 0)
+          return SDValue();
+
         unsigned MaskBits = AndMask.countTrailingOnes();
         EVT HalfVT = EVT::getIntegerVT(*DAG.getContext(), Size / 2);
 
@@ -3064,7 +3072,7 @@ SDValue DAGCombiner::visitANDLike(SDValue N0, SDValue N1,
           // extended to handle extensions mixed in.
 
           SDValue SL(N0);
-          assert(ShiftBits != 0 && MaskBits <= Size);
+          assert(MaskBits <= Size);
 
           // Extracting the highest bit of the low half.
           EVT ShiftVT = TLI.getShiftAmountTy(HalfVT, DAG.getDataLayout());
@@ -3128,6 +3136,10 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
   SDValue N0 = N->getOperand(0);
   SDValue N1 = N->getOperand(1);
   EVT VT = N1.getValueType();
+
+  // x & x --> x
+  if (N0 == N1)
+    return N0;
 
   // fold vector ops
   if (VT.isVector()) {
@@ -3805,6 +3817,10 @@ SDValue DAGCombiner::visitOR(SDNode *N) {
   SDValue N0 = N->getOperand(0);
   SDValue N1 = N->getOperand(1);
   EVT VT = N1.getValueType();
+
+  // x | x --> x
+  if (N0 == N1)
+    return N0;
 
   // fold vector ops
   if (VT.isVector()) {
@@ -4496,7 +4512,6 @@ SDValue DAGCombiner::visitSHL(SDNode *N) {
   unsigned OpSizeInBits = VT.getScalarSizeInBits();
 
   // fold vector ops
-  ConstantSDNode *N1C = dyn_cast<ConstantSDNode>(N1);
   if (VT.isVector()) {
     if (SDValue FoldedVOp = SimplifyVBinOp(N))
       return FoldedVOp;
@@ -4517,11 +4532,11 @@ SDValue DAGCombiner::visitSHL(SDNode *N) {
                                                      N01CV, N1CV))
             return DAG.getNode(ISD::AND, SDLoc(N), VT, N00, C);
         }
-      } else {
-        N1C = isConstOrConstSplat(N1);
       }
     }
   }
+
+  ConstantSDNode *N1C = isConstOrConstSplat(N1);
 
   // fold (shl c1, c2) -> c1<<c2
   ConstantSDNode *N0C = getAsNonOpaqueConstant(N0);
@@ -5570,7 +5585,7 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
                            Alignment, MST->getAAInfo(), MST->getRanges());
 
     Lo = DAG.getMaskedStore(Chain, DL, DataLo, Ptr, MaskLo, LoMemVT, MMO,
-                            MST->isTruncatingStore());
+                            MST->isTruncatingStore(), MST->isCompressingStore());
 
     unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
     Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr,
@@ -5583,7 +5598,7 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
                            MST->getRanges());
 
     Hi = DAG.getMaskedStore(Chain, DL, DataHi, Ptr, MaskHi, HiMemVT, MMO,
-                            MST->isTruncatingStore());
+                            MST->isTruncatingStore(), MST->isCompressingStore());
 
     AddToWorklist(Lo.getNode());
     AddToWorklist(Hi.getNode());
@@ -6762,15 +6777,15 @@ SDValue DAGCombiner::visitANY_EXTEND(SDNode *N) {
       N0.getOperand(1).getOpcode() == ISD::Constant &&
       !TLI.isTruncateFree(N0.getOperand(0).getOperand(0).getValueType(),
                           N0.getValueType())) {
+    SDLoc DL(N);
     SDValue X = N0.getOperand(0).getOperand(0);
     if (X.getValueType().bitsLT(VT)) {
-      X = DAG.getNode(ISD::ANY_EXTEND, SDLoc(N), VT, X);
+      X = DAG.getNode(ISD::ANY_EXTEND, DL, VT, X);
     } else if (X.getValueType().bitsGT(VT)) {
-      X = DAG.getNode(ISD::TRUNCATE, SDLoc(N), VT, X);
+      X = DAG.getNode(ISD::TRUNCATE, DL, VT, X);
     }
     APInt Mask = cast<ConstantSDNode>(N0.getOperand(1))->getAPIntValue();
     Mask = Mask.zext(VT.getSizeInBits());
-    SDLoc DL(N);
     return DAG.getNode(ISD::AND, DL, VT,
                        X, DAG.getConstant(Mask, DL, VT));
   }
@@ -7289,7 +7304,7 @@ SDValue DAGCombiner::visitTRUNCATE(SDNode *N) {
   }
 
   // trunc (select c, a, b) -> select c, (trunc a), (trunc b)
-  if (N0.getOpcode() == ISD::SELECT) {
+  if (N0.getOpcode() == ISD::SELECT && N0.hasOneUse()) {
     EVT SrcVT = N0.getValueType();
     if ((!LegalOperations || TLI.isOperationLegal(ISD::SELECT, SrcVT)) &&
         TLI.isTruncateFree(SrcVT, VT)) {
@@ -11500,6 +11515,7 @@ bool DAGCombiner::MergeStoresOfConstantsOrVecElts(
     }
   }
 
+  StoreNodes.erase(StoreNodes.begin() + NumStores, StoreNodes.end());
   return true;
 }
 
@@ -11642,7 +11658,8 @@ bool DAGCombiner::checkMergeStoreCandidatesForDependencies(
   return true;
 }
 
-bool DAGCombiner::MergeConsecutiveStores(StoreSDNode* St) {
+bool DAGCombiner::MergeConsecutiveStores(
+    StoreSDNode* St, SmallVectorImpl<MemOpLink> &StoreNodes) {
   if (OptLevel == CodeGenOpt::None)
     return false;
 
@@ -11685,9 +11702,6 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode* St) {
   // We need to make sure that these nodes do not interfere with
   // any of the store nodes.
   SmallVector<LSBaseSDNode*, 8> AliasLoadNodes;
-
-  // Save the StoreSDNodes that we find in the chain.
-  SmallVector<MemOpLink, 8> StoreNodes;
 
   getStoreMergeAndAliasCandidates(St, StoreNodes, AliasLoadNodes);
 
@@ -12047,6 +12061,7 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode* St) {
     }
   }
 
+  StoreNodes.erase(StoreNodes.begin() + NumElem, StoreNodes.end());
   return true;
 }
 
@@ -12290,19 +12305,20 @@ SDValue DAGCombiner::visitSTORE(SDNode *N) {
   // Only perform this optimization before the types are legal, because we
   // don't want to perform this optimization on every DAGCombine invocation.
   if (!LegalTypes) {
-    bool EverChanged = false;
-
-    do {
+    for (;;) {
       // There can be multiple store sequences on the same chain.
       // Keep trying to merge store sequences until we are unable to do so
       // or until we merge the last store on the chain.
-      bool Changed = MergeConsecutiveStores(ST);
-      EverChanged |= Changed;
+      SmallVector<MemOpLink, 8> StoreNodes;
+      bool Changed = MergeConsecutiveStores(ST, StoreNodes);
       if (!Changed) break;
-    } while (ST->getOpcode() != ISD::DELETED_NODE);
 
-    if (EverChanged)
-      return SDValue(N, 0);
+      if (any_of(StoreNodes,
+                 [ST](const MemOpLink &Link) { return Link.MemNode == ST; })) {
+        // ST has been merged and no longer exists.
+        return SDValue(N, 0);
+      }
+    }
   }
 
   // Turn 'store float 1.0, Ptr' -> 'store int 0x12345678, Ptr'
@@ -14912,6 +14928,12 @@ SDValue DAGCombiner::BuildUDIV(SDNode *N) {
   return S;
 }
 
+/// Newton iteration for a function: F(X) is X_{i+1} = X_i - F(X_i)/F'(X_i)
+/// For the reciprocal, we need to find the zero of the function:
+///   F(X) = A X - 1 [which has a zero at X = 1/A]
+///     =>
+///   X_{i+1} = X_i (2 - A X_i) = X_i + X_i (1 - A X_i) [this second form
+///     does not require additional intermediate precision]
 SDValue DAGCombiner::BuildReciprocalEstimate(SDValue Op, SDNodeFlags *Flags) {
   if (Level >= AfterLegalizeDAG)
     return SDValue();
@@ -14931,18 +14953,12 @@ SDValue DAGCombiner::BuildReciprocalEstimate(SDValue Op, SDNodeFlags *Flags) {
   // refinement steps.
   int Iterations = TLI.getDivRefinementSteps(VT, MF);
   if (SDValue Est = TLI.getRecipEstimate(Op, DAG, Enabled, Iterations)) {
+    AddToWorklist(Est.getNode());
+
     if (Iterations) {
-      // Newton iteration for a function: F(X) is X_{i+1} = X_i - F(X_i)/F'(X_i)
-      // For the reciprocal, we need to find the zero of the function:
-      //   F(X) = A X - 1 [which has a zero at X = 1/A]
-      //     =>
-      //   X_{i+1} = X_i (2 - A X_i) = X_i + X_i (1 - A X_i) [this second form
-      //     does not require additional intermediate precision]
       EVT VT = Op.getValueType();
       SDLoc DL(Op);
       SDValue FPOne = DAG.getConstantFP(1.0, DL, VT);
-
-      AddToWorklist(Est.getNode());
 
       // Newton iterations: Est = Est + Est (1 - Arg * Est)
       for (int i = 0; i < Iterations; ++i) {
@@ -15084,12 +15100,30 @@ SDValue DAGCombiner::buildSqrtEstimateImpl(SDValue Op, SDNodeFlags *Flags,
 
   bool UseOneConstNR = false;
   if (SDValue Est =
-      TLI.getRsqrtEstimate(Op, DAG, Enabled, Iterations, UseOneConstNR)) {
+      TLI.getSqrtEstimate(Op, DAG, Enabled, Iterations, UseOneConstNR,
+                          Reciprocal)) {
     AddToWorklist(Est.getNode());
+
     if (Iterations) {
       Est = UseOneConstNR
-      ? buildSqrtNROneConst(Op, Est, Iterations, Flags, Reciprocal)
-      : buildSqrtNRTwoConst(Op, Est, Iterations, Flags, Reciprocal);
+            ? buildSqrtNROneConst(Op, Est, Iterations, Flags, Reciprocal)
+            : buildSqrtNRTwoConst(Op, Est, Iterations, Flags, Reciprocal);
+
+      if (!Reciprocal) {
+        // Unfortunately, Est is now NaN if the input was exactly 0.0.
+        // Select out this case and force the answer to 0.0.
+        EVT VT = Op.getValueType();
+        SDLoc DL(Op);
+
+        SDValue FPZero = DAG.getConstantFP(0.0, DL, VT);
+        EVT CCVT = getSetCCResultType(VT);
+        SDValue ZeroCmp = DAG.getSetCC(DL, CCVT, Op, FPZero, ISD::SETEQ);
+        AddToWorklist(ZeroCmp.getNode());
+
+        Est = DAG.getNode(VT.isVector() ? ISD::VSELECT : ISD::SELECT, DL, VT,
+                          ZeroCmp, FPZero, Est);
+        AddToWorklist(Est.getNode());
+      }
     }
     return Est;
   }
@@ -15102,23 +15136,7 @@ SDValue DAGCombiner::buildRsqrtEstimate(SDValue Op, SDNodeFlags *Flags) {
 }
 
 SDValue DAGCombiner::buildSqrtEstimate(SDValue Op, SDNodeFlags *Flags) {
-  SDValue Est = buildSqrtEstimateImpl(Op, Flags, false);
-  if (!Est)
-    return SDValue();
-
-  // Unfortunately, Est is now NaN if the input was exactly 0.
-  // Select out this case and force the answer to 0.
-  EVT VT = Est.getValueType();
-  SDLoc DL(Op);
-  SDValue Zero = DAG.getConstantFP(0.0, DL, VT);
-  EVT CCVT = getSetCCResultType(VT);
-  SDValue ZeroCmp = DAG.getSetCC(DL, CCVT, Op, Zero, ISD::SETEQ);
-  AddToWorklist(ZeroCmp.getNode());
-
-  Est = DAG.getNode(VT.isVector() ? ISD::VSELECT : ISD::SELECT, DL, VT, ZeroCmp,
-                    Zero, Est);
-  AddToWorklist(Est.getNode());
-  return Est;
+  return buildSqrtEstimateImpl(Op, Flags, false);
 }
 
 /// Return true if base is a frame index, which is known not to alias with

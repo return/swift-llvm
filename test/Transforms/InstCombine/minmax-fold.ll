@@ -144,9 +144,8 @@ define <4 x i32> @bitcasts_fcmp_1(<2 x i64> %a, <2 x i64> %b) {
 ; CHECK-NEXT:    [[T0:%.*]] = bitcast <2 x i64> %a to <4 x float>
 ; CHECK-NEXT:    [[T1:%.*]] = bitcast <2 x i64> %b to <4 x float>
 ; CHECK-NEXT:    [[T2:%.*]] = fcmp olt <4 x float> [[T1]], [[T0]]
-; CHECK-NEXT:    [[T3:%.*]] = bitcast <2 x i64> %a to <4 x i32>
-; CHECK-NEXT:    [[T4:%.*]] = bitcast <2 x i64> %b to <4 x i32>
-; CHECK-NEXT:    [[T5:%.*]] = select <4 x i1> [[T2]], <4 x i32> [[T3]], <4 x i32> [[T4]]
+; CHECK-NEXT:    [[TMP1:%.*]] = select <4 x i1> [[T2]], <4 x float> [[T0]], <4 x float> [[T1]]
+; CHECK-NEXT:    [[T5:%.*]] = bitcast <4 x float> [[TMP1]] to <4 x i32>
 ; CHECK-NEXT:    ret <4 x i32> [[T5]]
 ;
   %t0 = bitcast <2 x i64> %a to <4 x float>
@@ -165,9 +164,8 @@ define <4 x i32> @bitcasts_fcmp_2(<2 x i64> %a, <2 x i64> %b) {
 ; CHECK-NEXT:    [[T0:%.*]] = bitcast <2 x i64> %a to <4 x float>
 ; CHECK-NEXT:    [[T1:%.*]] = bitcast <2 x i64> %b to <4 x float>
 ; CHECK-NEXT:    [[T2:%.*]] = fcmp olt <4 x float> [[T0]], [[T1]]
-; CHECK-NEXT:    [[T3:%.*]] = bitcast <2 x i64> %a to <4 x i32>
-; CHECK-NEXT:    [[T4:%.*]] = bitcast <2 x i64> %b to <4 x i32>
-; CHECK-NEXT:    [[T5:%.*]] = select <4 x i1> [[T2]], <4 x i32> [[T3]], <4 x i32> [[T4]]
+; CHECK-NEXT:    [[TMP1:%.*]] = select <4 x i1> [[T2]], <4 x float> [[T0]], <4 x float> [[T1]]
+; CHECK-NEXT:    [[T5:%.*]] = bitcast <4 x float> [[TMP1]] to <4 x i32>
 ; CHECK-NEXT:    ret <4 x i32> [[T5]]
 ;
   %t0 = bitcast <2 x i64> %a to <4 x float>
@@ -186,9 +184,8 @@ define <4 x float> @bitcasts_icmp(<2 x i64> %a, <2 x i64> %b) {
 ; CHECK-NEXT:    [[T0:%.*]] = bitcast <2 x i64> %a to <4 x i32>
 ; CHECK-NEXT:    [[T1:%.*]] = bitcast <2 x i64> %b to <4 x i32>
 ; CHECK-NEXT:    [[T2:%.*]] = icmp slt <4 x i32> [[T1]], [[T0]]
-; CHECK-NEXT:    [[T3:%.*]] = bitcast <2 x i64> %a to <4 x float>
-; CHECK-NEXT:    [[T4:%.*]] = bitcast <2 x i64> %b to <4 x float>
-; CHECK-NEXT:    [[T5:%.*]] = select <4 x i1> [[T2]], <4 x float> [[T3]], <4 x float> [[T4]]
+; CHECK-NEXT:    [[TMP1:%.*]] = select <4 x i1> [[T2]], <4 x i32> [[T0]], <4 x i32> [[T1]]
+; CHECK-NEXT:    [[T5:%.*]] = bitcast <4 x i32> [[TMP1]] to <4 x float>
 ; CHECK-NEXT:    ret <4 x float> [[T5]]
 ;
   %t0 = bitcast <2 x i64> %a to <4 x i32>
@@ -198,5 +195,147 @@ define <4 x float> @bitcasts_icmp(<2 x i64> %a, <2 x i64> %b) {
   %t4 = bitcast <2 x i64> %b to <4 x float>
   %t5 = select <4 x i1> %t2, <4 x float> %t3, <4 x float> %t4
   ret <4 x float> %t5
+}
+
+; SMIN(SMIN(X, 11), 92) -> SMIN(X, 11)
+define i32 @test68(i32 %x) {
+; CHECK-LABEL: @test68(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp sgt i32 %x, 11
+; CHECK-NEXT:    [[COND:%.*]] = select i1 [[CMP]], i32 11, i32 %x
+; CHECK-NEXT:    ret i32 [[COND]]
+;
+  %cmp = icmp slt i32 11, %x
+  %cond = select i1 %cmp, i32 11, i32 %x
+  %cmp3 = icmp slt i32 92, %cond
+  %retval = select i1 %cmp3, i32 92, i32 %cond
+  ret i32 %retval
+}
+
+define <2 x i32> @test68vec(<2 x i32> %x) {
+; CHECK-LABEL: @test68vec(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp sgt <2 x i32> %x, <i32 11, i32 11>
+; CHECK-NEXT:    [[COND:%.*]] = select <2 x i1> [[CMP]], <2 x i32> <i32 11, i32 11>, <2 x i32> %x
+; CHECK-NEXT:    ret <2 x i32> [[COND]]
+;
+  %cmp = icmp slt <2 x i32> <i32 11, i32 11>, %x
+  %cond = select <2 x i1> %cmp, <2 x i32> <i32 11, i32 11>, <2 x i32> %x
+  %cmp3 = icmp slt <2 x i32> <i32 92, i32 92>, %cond
+  %retval = select <2 x i1> %cmp3, <2 x i32> <i32 92, i32 92>, <2 x i32> %cond
+  ret <2 x i32> %retval
+}
+
+; MIN(MIN(X, 24), 83) -> MIN(X, 24)
+define i32 @test69(i32 %x) {
+; CHECK-LABEL: @test69(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ugt i32 %x, 24
+; CHECK-NEXT:    [[COND:%.*]] = select i1 [[CMP]], i32 24, i32 %x
+; CHECK-NEXT:    ret i32 [[COND]]
+;
+  %cmp = icmp ult i32 24, %x
+  %cond = select i1 %cmp, i32 24, i32 %x
+  %cmp3 = icmp ult i32 83, %cond
+  %retval = select i1 %cmp3, i32 83, i32 %cond
+  ret i32 %retval
+}
+
+; SMAX(SMAX(X, 75), 36) -> SMAX(X, 75)
+define i32 @test70(i32 %x) {
+; CHECK-LABEL: @test70(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp slt i32 %x, 75
+; CHECK-NEXT:    [[COND:%.*]] = select i1 [[CMP]], i32 75, i32 %x
+; CHECK-NEXT:    ret i32 [[COND]]
+;
+  %cmp = icmp slt i32 %x, 75
+  %cond = select i1 %cmp, i32 75, i32 %x
+  %cmp3 = icmp slt i32 %cond, 36
+  %retval = select i1 %cmp3, i32 36, i32 %cond
+  ret i32 %retval
+}
+
+; MAX(MAX(X, 68), 47) -> MAX(X, 68)
+define i32 @test71(i32 %x) {
+; CHECK-LABEL: @test71(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ult i32 %x, 68
+; CHECK-NEXT:    [[COND:%.*]] = select i1 [[CMP]], i32 68, i32 %x
+; CHECK-NEXT:    ret i32 [[COND]]
+;
+  %cmp = icmp ult i32 %x, 68
+  %cond = select i1 %cmp, i32 68, i32 %x
+  %cmp3 = icmp ult i32 %cond, 47
+  %retval = select i1 %cmp3, i32 47, i32 %cond
+  ret i32 %retval
+}
+
+; SMIN(SMIN(X, 92), 11) -> SMIN(X, 11)
+define i32 @test72(i32 %x) {
+; CHECK-LABEL: @test72(
+; CHECK-NEXT:    [[CMP31:%.*]] = icmp sgt i32 %x, 11
+; CHECK-NEXT:    [[RETVAL:%.*]] = select i1 [[CMP31]], i32 11, i32 %x
+; CHECK-NEXT:    ret i32 [[RETVAL]]
+;
+  %cmp = icmp sgt i32 %x, 92
+  %cond = select i1 %cmp, i32 92, i32 %x
+  %cmp3 = icmp sgt i32 %cond, 11
+  %retval = select i1 %cmp3, i32 11, i32 %cond
+  ret i32 %retval
+}
+
+; FIXME - vector neglect: FoldOrOfICmps()
+
+define <2 x i32> @test72vec(<2 x i32> %x) {
+; CHECK-LABEL: @test72vec(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp sgt <2 x i32> %x, <i32 92, i32 92>
+; CHECK-NEXT:    [[CMP31:%.*]] = icmp sgt <2 x i32> %x, <i32 11, i32 11>
+; CHECK-NEXT:    [[CMP3:%.*]] = or <2 x i1> [[CMP]], [[CMP31:%.*]]
+; CHECK-NEXT:    [[RETVAL:%.*]] = select <2 x i1> [[CMP3]], <2 x i32> <i32 11, i32 11>, <2 x i32> %x
+; CHECK-NEXT:    ret <2 x i32> [[RETVAL]]
+;
+  %cmp = icmp sgt <2 x i32> %x, <i32 92, i32 92>
+  %cond = select <2 x i1> %cmp, <2 x i32> <i32 92, i32 92>, <2 x i32> %x
+  %cmp3 = icmp sgt <2 x i32> %cond, <i32 11, i32 11>
+  %retval = select <2 x i1> %cmp3, <2 x i32> <i32 11, i32 11>, <2 x i32> %cond
+  ret <2 x i32> %retval
+}
+
+; MIN(MIN(X, 83), 24) -> MIN(X, 24)
+define i32 @test73(i32 %x) {
+; CHECK-LABEL: @test73(
+; CHECK-NEXT:    [[CMP31:%.*]] = icmp ugt i32 %x, 24
+; CHECK-NEXT:    [[RETVAL:%.*]] = select i1 [[CMP31]], i32 24, i32 %x
+; CHECK-NEXT:    ret i32 [[RETVAL]]
+;
+  %cmp = icmp ugt i32 %x, 83
+  %cond = select i1 %cmp, i32 83, i32 %x
+  %cmp3 = icmp ugt i32 %cond, 24
+  %retval = select i1 %cmp3, i32 24, i32 %cond
+  ret i32 %retval
+}
+
+; SMAX(SMAX(X, 36), 75) -> SMAX(X, 75)
+define i32 @test74(i32 %x) {
+; CHECK-LABEL: @test74(
+; CHECK-NEXT:    [[CMP31:%.*]] = icmp slt i32 %x, 75
+; CHECK-NEXT:    [[RETVAL:%.*]] = select i1 [[CMP31]], i32 75, i32 %x
+; CHECK-NEXT:    ret i32 [[RETVAL]]
+;
+  %cmp = icmp slt i32 %x, 36
+  %cond = select i1 %cmp, i32 36, i32 %x
+  %cmp3 = icmp slt i32 %cond, 75
+  %retval = select i1 %cmp3, i32 75, i32 %cond
+  ret i32 %retval
+}
+
+; MAX(MAX(X, 47), 68) -> MAX(X, 68)
+define i32 @test75(i32 %x) {
+; CHECK-LABEL: @test75(
+; CHECK-NEXT:    [[CMP31:%.*]] = icmp ult i32 %x, 68
+; CHECK-NEXT:    [[RETVAL:%.*]] = select i1 [[CMP31]], i32 68, i32 %x
+; CHECK-NEXT:    ret i32 [[RETVAL]]
+;
+  %cmp = icmp ult i32 %x, 47
+  %cond = select i1 %cmp, i32 47, i32 %x
+  %cmp3 = icmp ult i32 %cond, 68
+  %retval = select i1 %cmp3, i32 68, i32 %cond
+  ret i32 %retval
 }
 
