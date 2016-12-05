@@ -412,6 +412,7 @@ function(llvm_add_library name)
 
   if(ARG_MODULE)
     add_library(${name} MODULE ${ALL_FILES})
+    llvm_setup_rpath(${name})
   elseif(ARG_SHARED)
     add_windows_version_resource_file(ALL_FILES ${ALL_FILES})
     add_library(${name} SHARED ${ALL_FILES})
@@ -421,6 +422,8 @@ function(llvm_add_library name)
   else()
     add_library(${name} STATIC ${ALL_FILES})
   endif()
+
+  setup_dependency_debugging(${name} ${LLVM_COMMON_DEPENDS})
 
   if(DEFINED windows_resource_file)
     set_windows_version_resource_properties(${name} ${windows_resource_file})
@@ -645,8 +648,10 @@ endmacro(add_llvm_loadable_module name)
 
 
 macro(add_llvm_executable name)
-  cmake_parse_arguments(ARG "DISABLE_LLVM_LINK_LLVM_DYLIB;IGNORE_EXTERNALIZE_DEBUGINFO;NO_INSTALL_RPATH" "" "" ${ARGN})
+  cmake_parse_arguments(ARG "DISABLE_LLVM_LINK_LLVM_DYLIB;IGNORE_EXTERNALIZE_DEBUGINFO;NO_INSTALL_RPATH" "" "DEPENDS" ${ARGN})
   llvm_process_sources( ALL_FILES ${ARG_UNPARSED_ARGUMENTS} )
+
+  list(APPEND LLVM_COMMON_DEPENDS ${ARG_DEPENDS})
 
   # Generate objlib
   if(LLVM_ENABLE_OBJLIB)
@@ -668,12 +673,14 @@ macro(add_llvm_executable name)
     # it forces Xcode to properly link the static library.
     list(APPEND ALL_FILES "${LLVM_MAIN_SRC_DIR}/cmake/dummy.cpp")
   endif()
-
+  
   if( EXCLUDE_FROM_ALL )
     add_executable(${name} EXCLUDE_FROM_ALL ${ALL_FILES})
   else()
     add_executable(${name} ${ALL_FILES})
   endif()
+
+  setup_dependency_debugging(${name} ${LLVM_COMMON_DEPENDS})
 
   if(NOT ARG_NO_INSTALL_RPATH)
     llvm_setup_rpath(${name})
@@ -1247,7 +1254,7 @@ function(llvm_install_library_symlink name dest type)
 endfunction()
 
 function(llvm_install_symlink name dest)
-  cmake_parse_arguments(ARG "ALWAYS_GENERATE" "" "" ${ARGN})
+  cmake_parse_arguments(ARG "ALWAYS_GENERATE" "COMPONENT" "" ${ARGN})
   foreach(path ${CMAKE_MODULE_PATH})
     if(EXISTS ${path}/LLVMInstallSymlink.cmake)
       set(INSTALL_SYMLINK ${path}/LLVMInstallSymlink.cmake)
@@ -1255,10 +1262,14 @@ function(llvm_install_symlink name dest)
     endif()
   endforeach()
 
-  if(ARG_ALWAYS_GENERATE)
-    set(component ${dest})
+  if(ARG_COMPONENT)
+    set(component ${ARG_COMPONENT})
   else()
-    set(component ${name})
+    if(ARG_ALWAYS_GENERATE)
+      set(component ${dest})
+    else()
+      set(component ${name})
+    endif()
   endif()
 
   set(full_name ${name}${CMAKE_EXECUTABLE_SUFFIX})
@@ -1376,4 +1387,20 @@ function(llvm_setup_rpath name)
                         BUILD_WITH_INSTALL_RPATH On
                         INSTALL_RPATH "${_install_rpath}"
                         ${_install_name_dir})
+endfunction()
+
+function(setup_dependency_debugging name)
+  if(NOT LLVM_DEPENDENCY_DEBUGGING)
+    return()
+  endif()
+
+  if("intrinsics_gen" IN_LIST ARGN)
+    return()
+  endif()
+
+  set(deny_attributes_gen "(deny file* (literal \"${LLVM_BINARY_DIR}/include/llvm/IR/Attributes.gen\"))")
+  set(deny_intrinsics_gen "(deny file* (literal \"${LLVM_BINARY_DIR}/include/llvm/IR/Intrinsics.gen\"))")
+
+  set(sandbox_command "sandbox-exec -p '(version 1) (allow default) ${deny_attributes_gen} ${deny_intrinsics_gen}'")
+  set_target_properties(${name} PROPERTIES RULE_LAUNCH_COMPILE ${sandbox_command})
 endfunction()

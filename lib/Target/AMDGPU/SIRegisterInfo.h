@@ -50,8 +50,9 @@ public:
 
   bool requiresRegisterScavenging(const MachineFunction &Fn) const override;
 
-
   bool requiresFrameIndexScavenging(const MachineFunction &MF) const override;
+  bool requiresFrameIndexReplacementScavenging(
+    const MachineFunction &MF) const override;
   bool requiresVirtualBaseRegisters(const MachineFunction &Fn) const override;
   bool trackLivenessAfterRegAlloc(const MachineFunction &MF) const override;
 
@@ -172,6 +173,8 @@ public:
   unsigned getSGPRPressureSet() const { return SGPRSetID; };
   unsigned getVGPRPressureSet() const { return VGPRSetID; };
 
+  const TargetRegisterClass *getRegClassForReg(const MachineRegisterInfo &MRI,
+                                               unsigned Reg) const;
   bool isVGPR(const MachineRegisterInfo &MRI, unsigned Reg) const;
 
   bool isSGPRPressureSet(unsigned SetID) const {
@@ -250,9 +253,14 @@ public:
 
 private:
   void buildSpillLoadStore(MachineBasicBlock::iterator MI,
-                           unsigned LoadStoreOp, const MachineOperand *SrcDst,
-                           unsigned ScratchRsrcReg, unsigned ScratchOffset,
-                           int64_t Offset,
+                           unsigned LoadStoreOp,
+                           int Index,
+                           unsigned ValueReg,
+                           bool ValueIsKill,
+                           unsigned ScratchRsrcReg,
+                           unsigned ScratchOffsetReg,
+                           int64_t InstrOffset,
+                           MachineMemOperand *MMO,
                            RegScavenger *RS) const;
 };
 

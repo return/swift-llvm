@@ -299,7 +299,7 @@ bool SIInstrInfo::getMemOpBaseRegImmOfs(MachineInstr &LdSt, unsigned &BaseReg,
   }
 
   if (isFLAT(LdSt)) {
-    const MachineOperand *AddrReg = getNamedOperand(LdSt, AMDGPU::OpName::addr);
+    const MachineOperand *AddrReg = getNamedOperand(LdSt, AMDGPU::OpName::vaddr);
     BaseReg = AddrReg->getReg();
     Offset = 0;
     return true;
@@ -314,20 +314,16 @@ bool SIInstrInfo::shouldClusterMemOps(MachineInstr &FirstLdSt,
   const MachineOperand *FirstDst = nullptr;
   const MachineOperand *SecondDst = nullptr;
 
-  if (isDS(FirstLdSt) && isDS(SecondLdSt)) {
-    FirstDst = getNamedOperand(FirstLdSt, AMDGPU::OpName::vdst);
-    SecondDst = getNamedOperand(SecondLdSt, AMDGPU::OpName::vdst);
-  }
-
-  if (isSMRD(FirstLdSt) && isSMRD(SecondLdSt)) {
-    FirstDst = getNamedOperand(FirstLdSt, AMDGPU::OpName::sdst);
-    SecondDst = getNamedOperand(SecondLdSt, AMDGPU::OpName::sdst);
-  }
-
   if ((isMUBUF(FirstLdSt) && isMUBUF(SecondLdSt)) ||
       (isMTBUF(FirstLdSt) && isMTBUF(SecondLdSt))) {
     FirstDst = getNamedOperand(FirstLdSt, AMDGPU::OpName::vdata);
     SecondDst = getNamedOperand(SecondLdSt, AMDGPU::OpName::vdata);
+  } else if (isSMRD(FirstLdSt) && isSMRD(SecondLdSt)) {
+    FirstDst = getNamedOperand(FirstLdSt, AMDGPU::OpName::sdst);
+    SecondDst = getNamedOperand(SecondLdSt, AMDGPU::OpName::sdst);
+  } else if (isDS(FirstLdSt) && isDS(SecondLdSt)) {
+    FirstDst = getNamedOperand(FirstLdSt, AMDGPU::OpName::vdst);
+    SecondDst = getNamedOperand(SecondLdSt, AMDGPU::OpName::vdst);
   }
 
   if (!FirstDst || !SecondDst)
@@ -364,7 +360,8 @@ void SIInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     return;
   }
 
-  if (RC == &AMDGPU::SReg_32RegClass) {
+  if (RC == &AMDGPU::SReg_32_XM0RegClass ||
+      RC == &AMDGPU::SReg_32RegClass) {
     if (SrcReg == AMDGPU::SCC) {
       BuildMI(MBB, MI, DL, get(AMDGPU::S_CSELECT_B32), DestReg)
           .addImm(-1)
@@ -2546,8 +2543,42 @@ void SIInstrInfo::legalizeOperandsSMRD(MachineRegisterInfo &MRI,
   }
 }
 
+void SIInstrInfo::legalizeGenericOperand(MachineBasicBlock &InsertMBB,
+                                         MachineBasicBlock::iterator I,
+                                         const TargetRegisterClass *DstRC,
+                                         MachineOperand &Op,
+                                         MachineRegisterInfo &MRI,
+                                         const DebugLoc &DL) const {
+
+  unsigned OpReg = Op.getReg();
+  unsigned OpSubReg = Op.getSubReg();
+
+  const TargetRegisterClass *OpRC = RI.getSubClassWithSubReg(
+      RI.getRegClassForReg(MRI, OpReg), OpSubReg);
+
+  // Check if operand is already the correct register class.
+  if (DstRC == OpRC)
+    return;
+
+  unsigned DstReg = MRI.createVirtualRegister(DstRC);
+  MachineInstr *Copy = BuildMI(InsertMBB, I, DL, get(AMDGPU::COPY), DstReg)
+                               .addOperand(Op);
+
+  Op.setReg(DstReg);
+  Op.setSubReg(0);
+
+  MachineInstr *Def = MRI.getVRegDef(OpReg);
+  if (!Def)
+    return;
+
+  // Try to eliminate the copy if it is copying an immediate value.
+  if (Def->isMoveImmediate())
+    FoldImmediate(*Copy, *Def, OpReg, &MRI);
+}
+
 void SIInstrInfo::legalizeOperands(MachineInstr &MI) const {
-  MachineRegisterInfo &MRI = MI.getParent()->getParent()->getRegInfo();
+  MachineFunction &MF = *MI.getParent()->getParent();
+  MachineRegisterInfo &MRI = MF.getRegInfo();
 
   // Legalize VOP2
   if (isVOP2(MI) || isVOPC(MI)) {
@@ -2603,15 +2634,14 @@ void SIInstrInfo::legalizeOperands(MachineInstr &MI) const {
       MachineOperand &Op = MI.getOperand(I);
       if (!Op.isReg() || !TargetRegisterInfo::isVirtualRegister(Op.getReg()))
         continue;
-      unsigned DstReg = MRI.createVirtualRegister(RC);
 
       // MI is a PHI instruction.
       MachineBasicBlock *InsertBB = MI.getOperand(I + 1).getMBB();
       MachineBasicBlock::iterator Insert = InsertBB->getFirstTerminator();
 
-      BuildMI(*InsertBB, Insert, MI.getDebugLoc(), get(AMDGPU::COPY), DstReg)
-          .addOperand(Op);
-      Op.setReg(DstReg);
+      // Avoid creating no-op copies with the same src and dst reg class.  These
+      // confuse some of the machine passes.
+      legalizeGenericOperand(*InsertBB, Insert, RC, Op, MRI, MI.getDebugLoc());
     }
   }
 
@@ -2635,12 +2665,7 @@ void SIInstrInfo::legalizeOperands(MachineInstr &MI) const {
         if (VRC == OpRC)
           continue;
 
-        unsigned DstReg = MRI.createVirtualRegister(VRC);
-
-        BuildMI(*MBB, MI, MI.getDebugLoc(), get(AMDGPU::COPY), DstReg)
-            .addOperand(Op);
-
-        Op.setReg(DstReg);
+        legalizeGenericOperand(*MBB, MI, VRC, Op, MRI, MI.getDebugLoc());
         Op.setIsKill();
       }
     }
@@ -2656,17 +2681,21 @@ void SIInstrInfo::legalizeOperands(MachineInstr &MI) const {
     const TargetRegisterClass *DstRC = MRI.getRegClass(Dst);
     const TargetRegisterClass *Src0RC = MRI.getRegClass(Src0);
     if (DstRC != Src0RC) {
-      MachineBasicBlock &MBB = *MI.getParent();
-      unsigned NewSrc0 = MRI.createVirtualRegister(DstRC);
-      BuildMI(MBB, MI, MI.getDebugLoc(), get(AMDGPU::COPY), NewSrc0)
-          .addReg(Src0);
-      MI.getOperand(1).setReg(NewSrc0);
+      MachineBasicBlock *MBB = MI.getParent();
+      MachineOperand &Op = MI.getOperand(1);
+      legalizeGenericOperand(*MBB, MI, DstRC, Op, MRI, MI.getDebugLoc());
     }
     return;
   }
 
-  // Legalize MIMG
-  if (isMIMG(MI)) {
+  // Legalize MIMG and MUBUF/MTBUF for shaders.
+  //
+  // Shaders only generate MUBUF/MTBUF instructions via intrinsics or via
+  // scratch memory access. In both cases, the legalization never involves
+  // conversion to the addr64 form.
+  if (isMIMG(MI) ||
+      (AMDGPU::isShader(MF.getFunction()->getCallingConv()) &&
+       (isMUBUF(MI) || isMTBUF(MI)))) {
     MachineOperand *SRsrc = getNamedOperand(MI, AMDGPU::OpName::srsrc);
     if (SRsrc && !RI.isSGPRClass(MRI.getRegClass(SRsrc->getReg()))) {
       unsigned SGPR = readlaneVGPRToSGPR(SRsrc->getReg(), MI, MRI);
@@ -2681,9 +2710,10 @@ void SIInstrInfo::legalizeOperands(MachineInstr &MI) const {
     return;
   }
 
-  // Legalize MUBUF* instructions
+  // Legalize MUBUF* instructions by converting to addr64 form.
   // FIXME: If we start using the non-addr64 instructions for compute, we
-  // may need to legalize them here.
+  // may need to legalize them as above. This especially applies to the
+  // buffer_load_format_* variants and variants with idxen (or bothen).
   int SRsrcIdx =
       AMDGPU::getNamedOperandIdx(MI.getOpcode(), AMDGPU::OpName::srsrc);
   if (SRsrcIdx != -1) {
@@ -3000,6 +3030,22 @@ void SIInstrInfo::moveToVALU(MachineInstr &TopInst) const {
         continue;
 
       unsigned DstReg = Inst.getOperand(0).getReg();
+      if (Inst.isCopy() &&
+          TargetRegisterInfo::isVirtualRegister(Inst.getOperand(1).getReg()) &&
+          NewDstRC == RI.getRegClassForReg(MRI, Inst.getOperand(1).getReg())) {
+        // Instead of creating a copy where src and dst are the same register
+        // class, we just replace all uses of dst with src.  These kinds of
+        // copies interfere with the heuristics MachineSink uses to decide
+        // whether or not to split a critical edge.  Since the pass assumes
+        // that copies will end up as machine instructions and not be
+        // eliminated.
+        addUsersToMoveToVALUWorklist(DstReg, MRI, Worklist);
+        MRI.replaceRegWith(DstReg, Inst.getOperand(1).getReg());
+        MRI.clearKillFlags(Inst.getOperand(1).getReg());
+        Inst.getOperand(0).setReg(DstReg);
+        continue;
+      }
+
       NewDstReg = MRI.createVirtualRegister(NewDstRC);
       MRI.replaceRegWith(DstReg, NewDstReg);
     }

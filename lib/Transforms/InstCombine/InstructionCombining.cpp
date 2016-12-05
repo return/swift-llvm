@@ -177,11 +177,10 @@ static bool simplifyAssocCastAssoc(BinaryOperator *BinOp1) {
     return false;
 
   // TODO: Enhance logic for other BinOps and remove this check.
-  auto AssocOpcode = BinOp1->getOpcode();
-  if (AssocOpcode != Instruction::Xor && AssocOpcode != Instruction::And &&
-      AssocOpcode != Instruction::Or)
+  if (!BinOp1->isBitwiseLogicOp())
     return false;
 
+  auto AssocOpcode = BinOp1->getOpcode();
   auto *BinOp2 = dyn_cast<BinaryOperator>(Cast->getOperand(0));
   if (!BinOp2 || !BinOp2->hasOneUse() || BinOp2->getOpcode() != AssocOpcode)
     return false;
@@ -741,17 +740,18 @@ Value *InstCombiner::dyn_castFNegVal(Value *V, bool IgnoreZeroSign) const {
   return nullptr;
 }
 
-static Value *FoldOperationIntoSelectOperand(Instruction &I, Value *SO,
+static Value *foldOperationIntoSelectOperand(Instruction &I, Value *SO,
                                              InstCombiner *IC) {
-  if (CastInst *CI = dyn_cast<CastInst>(&I)) {
-    return IC->Builder->CreateCast(CI->getOpcode(), SO, I.getType());
-  }
+  if (auto *Cast = dyn_cast<CastInst>(&I))
+    return IC->Builder->CreateCast(Cast->getOpcode(), SO, I.getType());
+
+  assert(I.isBinaryOp() && "Unexpected opcode for select folding");
 
   // Figure out if the constant is the left or the right argument.
   bool ConstIsRHS = isa<Constant>(I.getOperand(1));
   Constant *ConstOperand = cast<Constant>(I.getOperand(ConstIsRHS));
 
-  if (Constant *SOC = dyn_cast<Constant>(SO)) {
+  if (auto *SOC = dyn_cast<Constant>(SO)) {
     if (ConstIsRHS)
       return ConstantExpr::get(I.getOpcode(), SOC, ConstOperand);
     return ConstantExpr::get(I.getOpcode(), ConstOperand, SOC);
@@ -761,21 +761,13 @@ static Value *FoldOperationIntoSelectOperand(Instruction &I, Value *SO,
   if (!ConstIsRHS)
     std::swap(Op0, Op1);
 
-  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(&I)) {
-    Value *RI = IC->Builder->CreateBinOp(BO->getOpcode(), Op0, Op1,
-                                    SO->getName()+".op");
-    Instruction *FPInst = dyn_cast<Instruction>(RI);
-    if (FPInst && isa<FPMathOperator>(FPInst))
-      FPInst->copyFastMathFlags(BO);
-    return RI;
-  }
-  if (ICmpInst *CI = dyn_cast<ICmpInst>(&I))
-    return IC->Builder->CreateICmp(CI->getPredicate(), Op0, Op1,
-                                   SO->getName()+".cmp");
-  if (FCmpInst *CI = dyn_cast<FCmpInst>(&I))
-    return IC->Builder->CreateICmp(CI->getPredicate(), Op0, Op1,
-                                   SO->getName()+".cmp");
-  llvm_unreachable("Unknown binary instruction type!");
+  auto *BO = cast<BinaryOperator>(&I);
+  Value *RI = IC->Builder->CreateBinOp(BO->getOpcode(), Op0, Op1,
+                                       SO->getName() + ".op");
+  auto *FPInst = dyn_cast<Instruction>(RI);
+  if (FPInst && isa<FPMathOperator>(FPInst))
+    FPInst->copyFastMathFlags(BO);
+  return RI;
 }
 
 /// Given an instruction with a select as one operand and a constant as the
@@ -827,9 +819,9 @@ Instruction *InstCombiner::FoldOpIntoSelect(Instruction &Op, SelectInst *SI) {
     }
   }
 
-  Value *SelectTVal = FoldOperationIntoSelectOperand(Op, TV, this);
-  Value *SelectFVal = FoldOperationIntoSelectOperand(Op, FV, this);
-  return SelectInst::Create(SI->getCondition(), SelectTVal, SelectFVal);
+  Value *NewTV = foldOperationIntoSelectOperand(Op, TV, this);
+  Value *NewFV = foldOperationIntoSelectOperand(Op, FV, this);
+  return SelectInst::Create(SI->getCondition(), NewTV, NewFV, "", nullptr, SI);
 }
 
 /// Given a binary operator, cast instruction, or select which has a PHI node as
@@ -1397,7 +1389,7 @@ Instruction *InstCombiner::visitGetElementPtrInst(GetElementPtrInst &GEP) {
   for (User::op_iterator I = GEP.op_begin() + 1, E = GEP.op_end(); I != E;
        ++I, ++GTI) {
     // Skip indices into struct types.
-    if (isa<StructType>(*GTI))
+    if (GTI.isStruct())
       continue;
 
     // Index type should have the same width as IntPtr
@@ -1554,7 +1546,7 @@ Instruction *InstCombiner::visitGetElementPtrInst(GetElementPtrInst &GEP) {
     bool EndsWithSequential = false;
     for (gep_type_iterator I = gep_type_begin(*Src), E = gep_type_end(*Src);
          I != E; ++I)
-      EndsWithSequential = !(*I)->isStructTy();
+      EndsWithSequential = I.isSequential();
 
     // Can we combine the two pointer arithmetics offsets?
     if (EndsWithSequential) {
@@ -2583,7 +2575,7 @@ Instruction *InstCombiner::visitLandingPadInst(LandingPadInst &LI) {
           // remove it from the filter.  An unexpected type handler may be
           // set up for a call site which throws an exception of the same
           // type caught.  In order for the exception thrown by the unexpected
-          // handler to propogate correctly, the filter must be correctly
+          // handler to propagate correctly, the filter must be correctly
           // described for the call site.
           //
           // Example:

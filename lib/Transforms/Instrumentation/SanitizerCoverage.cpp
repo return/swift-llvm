@@ -357,9 +357,9 @@ bool SanitizerCoverageModule::runOnModule(Module &M) {
   // Create variable for module (compilation unit) name
   Constant *ModNameStrConst =
       ConstantDataArray::getString(M.getContext(), M.getName(), true);
-  GlobalVariable *ModuleName =
-      new GlobalVariable(M, ModNameStrConst->getType(), true,
-                         GlobalValue::PrivateLinkage, ModNameStrConst);
+  GlobalVariable *ModuleName = new GlobalVariable(
+      M, ModNameStrConst->getType(), true, GlobalValue::PrivateLinkage,
+      ModNameStrConst, "__sancov_gen_modname");
   if (Options.TracePCGuard) {
     if (HasSancovGuardsSection) {
       Function *CtorFunc;
@@ -705,8 +705,8 @@ void SanitizerCoverageModule::InjectCoverageAtBlock(Function &F, BasicBlock &BB,
           GuardLoad, Constant::getNullValue(GuardLoad->getType()));
       auto Ins = SplitBlockAndInsertIfThen(
           Cmp, &*IP, false, MDBuilder(*C).createBranchWeights(1, 100000));
-      IRB.SetCurrentDebugLocation(EntryLoc);
       IRB.SetInsertPoint(Ins);
+      IRB.SetCurrentDebugLocation(EntryLoc);
     }
     IRB.CreateCall(SanCovTracePCGuard, GuardPtr);
     IRB.CreateCall(EmptyAsm, {}); // Avoids callback merge.
