@@ -401,8 +401,11 @@ option(LLVM_ENABLE_EXPENSIVE_CHECKS "Enable expensive checks" OFF)
 set(LLVM_ABI_BREAKING_CHECKS "WITH_ASSERTS" CACHE STRING
   "Enable abi-breaking checks.  Can be WITH_ASSERTS, FORCE_ON or FORCE_OFF.")
 
+# Swift: Disable these checks. The Swift runtime uses some header-only code
+# from LLVM's ADT classes, and because we do not link libSupport into the
+# runtime, this leads to link failures when the checks are enabled.
 option(LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING
-  "Disable abi-breaking checks mismatch detection at link-tim." OFF)
+  "Disable abi-breaking checks mismatch detection at link-tim." ON)
 
 option(LLVM_FORCE_USE_OLD_HOST_TOOLCHAIN
        "Set to ON to force using an old, unsupported host toolchain." OFF)
