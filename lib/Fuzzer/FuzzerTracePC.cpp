@@ -59,41 +59,6 @@ void TracePC::PrintModuleInfo() {
   Printf("\n");
 }
 
-size_t TracePC::FinalizeTrace(InputCorpus *C, size_t InputSize, bool Shrink) {
-  if (!UsingTracePcGuard()) return 0;
-  size_t Res = 0;
-  const size_t Step = 8;
-  assert(reinterpret_cast<uintptr_t>(Counters) % Step == 0);
-  size_t N = Min(kNumCounters, NumGuards + 1);
-  N = (N + Step - 1) & ~(Step - 1);  // Round up.
-  for (size_t Idx = 0; Idx < N; Idx += Step) {
-    uint64_t Bundle = *reinterpret_cast<uint64_t*>(&Counters[Idx]);
-    if (!Bundle) continue;
-    for (size_t i = Idx; i < Idx + Step; i++) {
-      uint8_t Counter = (Bundle >> (i * 8)) & 0xff;
-      if (!Counter) continue;
-      Counters[i] = 0;
-      unsigned Bit = 0;
-      /**/ if (Counter >= 128) Bit = 7;
-      else if (Counter >= 32) Bit = 6;
-      else if (Counter >= 16) Bit = 5;
-      else if (Counter >= 8) Bit = 4;
-      else if (Counter >= 4) Bit = 3;
-      else if (Counter >= 3) Bit = 2;
-      else if (Counter >= 2) Bit = 1;
-      size_t Feature = (i * 8 + Bit);
-      if (C->AddFeature(Feature, InputSize, Shrink))
-        Res++;
-    }
-  }
-  if (UseValueProfile)
-    ValueProfileMap.ForEach([&](size_t Idx) {
-      if (C->AddFeature(NumGuards + Idx, InputSize, Shrink))
-        Res++;
-    });
-  return Res;
-}
-
 void TracePC::HandleCallerCallee(uintptr_t Caller, uintptr_t Callee) {
   const uintptr_t kBits = 12;
   const uintptr_t kMask = (1 << kBits) - 1;
@@ -124,8 +89,10 @@ void TracePC::PrintNewPCs() {
 }
 
 void TracePC::PrintCoverage() {
-  if (!EF->__sanitizer_symbolize_pc) {
-    Printf("INFO: __sanitizer_symbolize_pc is not available,"
+  if (!EF->__sanitizer_symbolize_pc ||
+      !EF->__sanitizer_get_module_and_offset_for_pc) {
+    Printf("INFO: __sanitizer_symbolize_pc or "
+           "__sanitizer_get_module_and_offset_for_pc is not available,"
            " not printing coverage\n");
     return;
   }
@@ -141,12 +108,15 @@ void TracePC::PrintCoverage() {
     std::string FixedPCStr = DescribePC("%p", PCs[i]);
     std::string FunctionStr = DescribePC("%F", PCs[i]);
     std::string LineStr = DescribePC("%l", PCs[i]);
-    // TODO(kcc): get the module using some other way since this
-    // does not work with ASAN_OPTIONS=strip_path_prefix=something.
-    std::string Module = DescribePC("%m", PCs[i]);
-    std::string OffsetStr = DescribePC("%o", PCs[i]);
+    char ModulePathRaw[4096] = "";  // What's PATH_MAX in portable C++?
+    void *OffsetRaw = nullptr;
+    if (!EF->__sanitizer_get_module_and_offset_for_pc(
+            reinterpret_cast<void *>(PCs[i]), ModulePathRaw,
+            sizeof(ModulePathRaw), &OffsetRaw))
+      continue;
+    std::string Module = ModulePathRaw;
     uintptr_t FixedPC = std::stol(FixedPCStr, 0, 16);
-    uintptr_t PcOffset = std::stol(OffsetStr, 0, 16);
+    uintptr_t PcOffset = reinterpret_cast<uintptr_t>(OffsetRaw);
     ModuleOffsets[Module] = FixedPC - PcOffset;
     CoveredPCsPerModule[Module].push_back(PcOffset);
     CoveredFunctions.insert(FunctionStr);

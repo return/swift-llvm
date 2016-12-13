@@ -239,6 +239,7 @@ public:
 
 private:
   void destroyValueName();
+  void doRAUW(Value *New, bool NoMetadata);
   void setNameImpl(const Twine &Name);
 
 public:
@@ -268,6 +269,12 @@ public:
   /// "V" instead of "this".  After this completes, 'this's use list is
   /// guaranteed to be empty.
   void replaceAllUsesWith(Value *V);
+
+  /// \brief Change non-metadata uses of this to point to a new Value.
+  ///
+  /// Go through the uses list for this definition and make each use point to
+  /// "V" instead of "this". This function skips metadata entries in the list.
+  void replaceNonMetadataUsesWith(Value *V);
 
   /// replaceUsesOutsideBlock - Go through the uses list for this definition and
   /// make each use point to "V" instead of "this" when the use is outside the
@@ -784,21 +791,6 @@ template <> struct isa_impl<GlobalObject, Value> {
   static inline bool doit(const Value &Val) {
     return isa<GlobalVariable>(Val) || isa<Function>(Val);
   }
-};
-
-// Value* is only 4-byte aligned.
-template<>
-class PointerLikeTypeTraits<Value*> {
-  typedef Value* PT;
-
-public:
-  static inline void *getAsVoidPointer(PT P) { return P; }
-
-  static inline PT getFromVoidPointer(void *P) {
-    return static_cast<PT>(P);
-  }
-
-  enum { NumLowBitsAvailable = 2 };
 };
 
 // Create wrappers for C Binding types (see CBindingWrapping.h).

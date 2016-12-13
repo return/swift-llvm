@@ -219,8 +219,8 @@ static void WorkerThread(const std::string &Cmd, std::atomic<int> *Counter,
   }
 }
 
-static std::string CloneArgsWithoutX(const std::vector<std::string> &Args,
-                                     const char *X1, const char *X2) {
+std::string CloneArgsWithoutX(const std::vector<std::string> &Args,
+                              const char *X1, const char *X2) {
   std::string Cmd;
   for (auto &S : Args) {
     if (FlagValue(S.c_str(), X1) || FlagValue(S.c_str(), X2))
@@ -228,11 +228,6 @@ static std::string CloneArgsWithoutX(const std::vector<std::string> &Args,
     Cmd += S + " ";
   }
   return Cmd;
-}
-
-static std::string CloneArgsWithoutX(const std::vector<std::string> &Args,
-                                     const char *X) {
-  return CloneArgsWithoutX(Args, X, X);
 }
 
 static int RunInMultipleProcesses(const std::vector<std::string> &Args,
@@ -287,16 +282,18 @@ int MinimizeCrashInput(const std::vector<std::string> &Args) {
     Printf("ERROR: -minimize_crash should be given one input file\n");
     exit(1);
   }
-  if (Flags.runs <= 0 && Flags.max_total_time == 0) {
-    Printf("ERROR: you need to use -runs=N or "
-           "-max_total_time=N with -minimize_crash=1\n" );
-    exit(1);
-  }
   std::string InputFilePath = Inputs->at(0);
-  std::string BaseCmd = CloneArgsWithoutX(Args, "minimize_crash");
+  std::string BaseCmd =
+      CloneArgsWithoutX(Args, "minimize_crash", "exact_artifact_path");
   auto InputPos = BaseCmd.find(" " + InputFilePath + " ");
   assert(InputPos != std::string::npos);
   BaseCmd.erase(InputPos, InputFilePath.size() + 1);
+  if (Flags.runs <= 0 && Flags.max_total_time == 0) {
+    Printf("INFO: you need to specify -runs=N or "
+           "-max_total_time=N with -minimize_crash=1\n"
+           "INFO: defaulting to -max_total_time=600\n");
+    BaseCmd += " -max_total_time=600";
+  }
   // BaseCmd += " >  /dev/null 2>&1 ";
 
   std::string CurrentFilePath = InputFilePath;
@@ -327,6 +324,10 @@ int MinimizeCrashInput(const std::vector<std::string> &Args) {
     Printf("CRASH_MIN: executing: %s\n", Cmd.c_str());
     ExitCode = ExecuteCommand(Cmd);
     if (ExitCode == 0) {
+      if (Flags.exact_artifact_path) {
+        CurrentFilePath = Flags.exact_artifact_path;
+        WriteToFile(U, CurrentFilePath);
+      }
       Printf("CRASH_MIN: failed to minimize beyond %s (%d bytes), exiting\n",
              CurrentFilePath.c_str(), U.size());
       return 0;
@@ -496,6 +497,16 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
     if (Options.MaxLen == 0)
       F->SetMaxInputLen(kMaxSaneLen);
     F->Merge(*Inputs);
+    exit(0);
+  }
+
+  if (Flags.experimental_merge) {
+    if (Options.MaxLen == 0)
+      F->SetMaxInputLen(kMaxSaneLen);
+    if (Flags.merge_control_file)
+      F->CrashResistantMergeInternalStep(Flags.merge_control_file);
+    else
+      F->CrashResistantMerge(Args, *Inputs);
     exit(0);
   }
 
