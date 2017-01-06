@@ -12606,8 +12606,7 @@ static SDValue lowerV4X128VectorShuffle(const SDLoc &DL, MVT VT,
                                         {0, 1, 2, 3, 0, 1, 2, 3});
   if (OnlyUsesV1 || isShuffleEquivalent(V1, V2, Mask,
                                         {0, 1, 2, 3, 8, 9, 10, 11})) {
-    MVT SubVT = MVT::getVectorVT(VT.getVectorElementType(),
-                                 VT.getVectorNumElements() / 2);
+    MVT SubVT = MVT::getVectorVT(VT.getVectorElementType(), 4);
     SDValue LoV = DAG.getNode(ISD::EXTRACT_SUBVECTOR, DL, SubVT, V1,
                               DAG.getIntPtrConstant(0, DL));
     SDValue HiV = DAG.getNode(ISD::EXTRACT_SUBVECTOR, DL, SubVT,
@@ -12616,33 +12615,57 @@ static SDValue lowerV4X128VectorShuffle(const SDLoc &DL, MVT VT,
     return DAG.getNode(ISD::CONCAT_VECTORS, DL, VT, LoV, HiV);
   }
 
-  SDValue Ops[2] = {DAG.getUNDEF(VT), DAG.getUNDEF(VT)};
-  // Insure elements came from the same Op.
-  int MaxOp1Index = VT.getVectorNumElements()/2 - 1;
-  for (int i = 0, Size = WidenedMask.size(); i < Size; ++i) {
-    if (WidenedMask[i] == SM_SentinelZero)
-      return SDValue();
-    if (WidenedMask[i] == SM_SentinelUndef)
+  assert(WidenedMask.size() == 4);
+
+  // See if this is an insertion of the lower 128-bits of V2 into V1.
+  bool IsInsert = true;
+  int V2Index = -1;
+  for (int i = 0; i < 4; ++i) {
+    assert(WidenedMask[i] >= -1);
+    if (WidenedMask[i] < 0)
       continue;
 
-    SDValue Op = WidenedMask[i] > MaxOp1Index ? V2 : V1;
-    unsigned OpIndex = (i < Size/2) ? 0 : 1;
+    // Make sure all V1 subvectors are in place.
+    if (WidenedMask[i] < 4) {
+      if (WidenedMask[i] != i) {
+        IsInsert = false;
+        break;
+      }
+    } else {
+      // Make sure we only have a single V2 index and its the lowest 128-bits.
+      if (V2Index >= 0 || WidenedMask[i] != 4) {
+        IsInsert = false;
+        break;
+      }
+      V2Index = i;
+    }
+  }
+  if (IsInsert && V2Index >= 0) {
+    MVT SubVT = MVT::getVectorVT(VT.getVectorElementType(), 2);
+    SDValue Subvec = DAG.getNode(ISD::EXTRACT_SUBVECTOR, DL, SubVT, V2,
+                                 DAG.getIntPtrConstant(0, DL));
+    return insert128BitVector(V1, Subvec, V2Index * 2, DAG, DL);
+  }
+
+  // Try to lower to to vshuf64x2/vshuf32x4.
+  SDValue Ops[2] = {DAG.getUNDEF(VT), DAG.getUNDEF(VT)};
+  unsigned PermMask = 0;
+  // Insure elements came from the same Op.
+  for (int i = 0; i < 4; ++i) {
+    assert(WidenedMask[i] >= -1);
+    if (WidenedMask[i] < 0)
+      continue;
+
+    SDValue Op = WidenedMask[i] >= 4 ? V2 : V1;
+    unsigned OpIndex = i / 2;
     if (Ops[OpIndex].isUndef())
       Ops[OpIndex] = Op;
     else if (Ops[OpIndex] != Op)
       return SDValue();
-  }
 
-  // Form a 128-bit permutation.
-  // Convert the 64-bit shuffle mask selection values into 128-bit selection
-  // bits defined by a vshuf64x2 instruction's immediate control byte.
-  unsigned PermMask = 0, Imm = 0;
-  unsigned ControlBitsNum = WidenedMask.size() / 2;
-
-  for (int i = 0, Size = WidenedMask.size(); i < Size; ++i) {
-    // Use first element in place of undef mask.
-    Imm = (WidenedMask[i] == SM_SentinelUndef) ? 0 : WidenedMask[i];
-    PermMask |= (Imm % WidenedMask.size()) << (i * ControlBitsNum);
+    // Convert the 128-bit shuffle mask selection values into 128-bit selection
+    // bits defined by a vshuf64x2 instruction's immediate control byte.
+    PermMask |= (WidenedMask[i] % 4) << (i * 2);
   }
 
   return DAG.getNode(X86ISD::SHUF128, DL, VT, Ops[0], Ops[1],
@@ -13062,10 +13085,10 @@ static SDValue lower1BitVectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
 static bool canonicalizeShuffleMaskWithCommute(ArrayRef<int> Mask) {
   int NumElements = Mask.size();
 
-  int NumV1Elements = 0, NumV2Elements = 0, NumSentinelElements = 0;
+  int NumV1Elements = 0, NumV2Elements = 0;
   for (int M : Mask)
     if (M < 0)
-      ++NumSentinelElements;
+      continue;
     else if (M < NumElements)
       ++NumV1Elements;
     else
@@ -30898,6 +30921,59 @@ static SDValue foldVectorXorShiftIntoCmp(SDNode *N, SelectionDAG &DAG,
   return DAG.getNode(X86ISD::PCMPGT, SDLoc(N), VT, Shift.getOperand(0), Ones);
 }
 
+/// Check if truncation with saturation form type \p SrcVT to \p DstVT 
+/// is valid for the given \p Subtarget.
+static bool 
+isSATValidOnSubtarget(EVT SrcVT, EVT DstVT, const X86Subtarget &Subtarget) {
+  if (!Subtarget.hasAVX512())
+    return false;
+  EVT SrcElVT = SrcVT.getScalarType();
+  EVT DstElVT = DstVT.getScalarType();
+  if (SrcElVT.getSizeInBits() < 16 || SrcElVT.getSizeInBits() > 64)
+    return false;
+  if (DstElVT.getSizeInBits() < 8 || DstElVT.getSizeInBits() > 32)
+    return false;
+  if (SrcVT.is512BitVector() || Subtarget.hasVLX())
+    return SrcElVT.getSizeInBits() >= 32 || Subtarget.hasBWI();
+  return false;
+}
+
+/// Detect a pattern of truncation with saturation:
+/// (truncate (umin (x, unsigned_max_of_dest_type)) to dest_type).
+/// Return the source value to be truncated or SDValue() if the pattern was not
+/// matched or the unsupported on the current target.
+static SDValue 
+detectUSatPattern(SDValue In, EVT VT, const X86Subtarget &Subtarget) {
+  if (In.getOpcode() != ISD::UMIN)
+    return SDValue();
+
+  EVT InVT = In.getValueType();
+  // FIXME: Scalar type may be supported if we move it to vector register.
+  if (!InVT.isVector() || !InVT.isSimple())
+    return SDValue();
+
+  if (!isSATValidOnSubtarget(InVT, VT, Subtarget))
+    return SDValue();
+
+  //Saturation with truncation. We truncate from InVT to VT.
+  assert(InVT.getScalarSizeInBits() > VT.getScalarSizeInBits() &&
+    "Unexpected types for truncate operation");
+
+  SDValue SrcVal;
+  APInt C;
+  if (ISD::isConstantSplatVector(In.getOperand(0).getNode(), C))
+    SrcVal = In.getOperand(1);
+  else if (ISD::isConstantSplatVector(In.getOperand(1).getNode(), C))
+    SrcVal = In.getOperand(0);
+  else
+    return SDValue();
+
+  // C should be equal to UINT32_MAX / UINT16_MAX / UINT8_MAX according
+  // the element size of the destination type.
+  return (C == ((uint64_t)1 << VT.getScalarSizeInBits()) - 1) ?
+    SrcVal : SDValue();
+}
+
 /// This function detects the AVG pattern between vectors of unsigned i8/i16,
 /// which is c = (a + b + 1) / 2, and replace this operation with the efficient
 /// X86ISD::AVG instruction.
@@ -31464,6 +31540,12 @@ static SDValue combineStore(SDNode *N, SelectionDAG &DAG,
                           St->getPointerInfo(), St->getAlignment(),
                           St->getMemOperand()->getFlags());
 
+    if (SDValue Val =
+        detectUSatPattern(St->getValue(), St->getMemoryVT(), Subtarget))
+      return EmitTruncSStore(false /* Unsigned saturation */, St->getChain(),
+                             dl, Val, St->getBasePtr(),
+                             St->getMemoryVT(), St->getMemOperand(), DAG);
+
     const TargetLowering &TLI = DAG.getTargetLoweringInfo();
     unsigned NumElems = VT.getVectorNumElements();
     assert(StVT != VT && "Cannot truncate to the same type");
@@ -31810,6 +31892,83 @@ static SDValue combineFaddFsub(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
+/// Attempt to pre-truncate inputs to arithmetic ops if it will simplify
+/// the codegen.
+/// e.g. TRUNC( BINOP( X, Y ) ) --> BINOP( TRUNC( X ), TRUNC( Y ) )
+static SDValue combineTruncatedArithmetic(SDNode *N, SelectionDAG &DAG,
+                                          const X86Subtarget &Subtarget,
+                                          SDLoc &DL) {
+  assert(N->getOpcode() == ISD::TRUNCATE && "Wrong opcode");
+  SDValue Src = N->getOperand(0);
+  unsigned Opcode = Src.getOpcode();
+  const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+
+  EVT VT = N->getValueType(0);
+  EVT SrcVT = Src.getValueType();
+
+  auto IsRepeatedOpOrOneUseConstant = [](SDValue Op0, SDValue Op1) {
+    // TODO: Add extra cases where we can truncate both inputs for the
+    // cost of one (or none).
+    // e.g. TRUNC( BINOP( EXT( X ), EXT( Y ) ) ) --> BINOP( X, Y )
+    if (Op0 == Op1)
+      return true;
+
+    SDValue BC0 = peekThroughOneUseBitcasts(Op0);
+    SDValue BC1 = peekThroughOneUseBitcasts(Op1);
+    return ISD::isBuildVectorOfConstantSDNodes(BC0.getNode()) ||
+           ISD::isBuildVectorOfConstantSDNodes(BC1.getNode());
+  };
+
+  auto TruncateArithmetic = [&](SDValue N0, SDValue N1) {
+    SDValue Trunc0 = DAG.getNode(ISD::TRUNCATE, DL, VT, N0);
+    SDValue Trunc1 = DAG.getNode(ISD::TRUNCATE, DL, VT, N1);
+    return DAG.getNode(Opcode, DL, VT, Trunc0, Trunc1);
+  };
+
+  // Don't combine if the operation has other uses.
+  if (!N->isOnlyUserOf(Src.getNode()))
+    return SDValue();
+
+  // Only support vector truncation for now.
+  // TODO: i64 scalar math would benefit as well.
+  if (!VT.isVector())
+    return SDValue();
+
+  // In most cases its only worth pre-truncating if we're only facing the cost
+  // of one truncation.
+  // i.e. if one of the inputs will constant fold or the input is repeated.
+  switch (Opcode) {
+  case ISD::AND:
+  case ISD::XOR:
+  case ISD::OR: {
+    SDValue Op0 = Src.getOperand(0);
+    SDValue Op1 = Src.getOperand(1);
+    if (TLI.isOperationLegalOrPromote(Opcode, VT) &&
+        IsRepeatedOpOrOneUseConstant(Op0, Op1))
+      return TruncateArithmetic(Op0, Op1);
+    break;
+  }
+
+  case ISD::MUL:
+    // X86 is rubbish at scalar and vector i64 multiplies (until AVX512DQ) - its
+    // better to truncate if we have the chance.
+    if (SrcVT.getScalarType() == MVT::i64 && TLI.isOperationLegal(Opcode, VT) &&
+        !TLI.isOperationLegal(Opcode, SrcVT))
+      return TruncateArithmetic(Src.getOperand(0), Src.getOperand(1));
+    LLVM_FALLTHROUGH;
+  case ISD::ADD: {
+    SDValue Op0 = Src.getOperand(0);
+    SDValue Op1 = Src.getOperand(1);
+    if (TLI.isOperationLegal(Opcode, VT) &&
+        IsRepeatedOpOrOneUseConstant(Op0, Op1))
+      return TruncateArithmetic(Op0, Op1);
+    break;
+  }
+  }
+
+  return SDValue();
+}
+
 /// Truncate a group of v4i32 into v16i8/v8i16 using X86ISD::PACKUS.
 static SDValue
 combineVectorTruncationWithPACKUS(SDNode *N, SelectionDAG &DAG,
@@ -31996,9 +32155,17 @@ static SDValue combineTruncate(SDNode *N, SelectionDAG &DAG,
   SDValue Src = N->getOperand(0);
   SDLoc DL(N);
 
+  // Attempt to pre-truncate inputs to arithmetic ops instead.
+  if (SDValue V = combineTruncatedArithmetic(N, DAG, Subtarget, DL))
+    return V;
+
   // Try to detect AVG pattern first.
   if (SDValue Avg = detectAVGPattern(Src, VT, DAG, Subtarget, DL))
     return Avg;
+
+  // Try the truncation with unsigned saturation.
+  if (SDValue Val = detectUSatPattern(Src, VT, Subtarget))
+    return DAG.getNode(X86ISD::VTRUNCUS, DL, VT, Val);
 
   // The bitcast source is a direct mmx result.
   // Detect bitcasts between i32 to x86mmx
