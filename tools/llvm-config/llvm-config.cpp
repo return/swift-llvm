@@ -309,7 +309,11 @@ int main(int argc, char **argv) {
                            "-I" + ActiveObjRoot + "/include");
   } else {
     ActivePrefix = CurrentExecPrefix;
+#ifdef __HAIKU__
+    ActiveIncludeDir = ActivePrefix + "/develop/headers";
+#else
     ActiveIncludeDir = ActivePrefix + "/include";
+#endif
     ActiveBinDir = ActivePrefix + "/bin";
     ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
     ActiveIncludeOption = "-I" + ActiveIncludeDir;
@@ -497,14 +501,26 @@ int main(int argc, char **argv) {
         OS << LLVM_HAS_RTTI << '\n';
       } else if (Arg == "--shared-mode") {
         PrintSharedMode = true;
-      } else if (Arg == "--obj-root") {
-        OS << ActivePrefix << '\n';
-      } else if (Arg == "--src-root") {
-        OS << LLVM_SRC_ROOT << '\n';
-      } else {
+      } else if (Arg == "--obj-root" || Arg == "--src-root") {
+        if (IsInDevelopmentTree) {
+          if (Arg == "--obj-root") {
+            OS << ActivePrefix << '\n';
+	   	  }
+          else {
+            OS << LLVM_SRC_ROOT << '\n';
+	  	  }
+        } 
+        else {
+          llvm::errs() << "llvm-config: sources not installed\n";
+          exit(1);
+        }
+     } 
+      else 
+      {
         usage();
       }
-    } else {
+    }
+      else {
       Components.push_back(Arg);
     }
   }

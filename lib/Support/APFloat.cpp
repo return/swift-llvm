@@ -55,6 +55,7 @@ namespace llvm {
 
     /* Number of bits actually used in the semantics. */
     unsigned int sizeInBits;
+    
   };
 
   const fltSemantics APFloat::IEEEhalf = { 15, -14, 11, 16 };
@@ -93,6 +94,7 @@ namespace llvm {
   const unsigned int maxPowerOfFiveExponent = maxExponent + maxPrecision - 1;
   const unsigned int maxPowerOfFiveParts = 2 + ((maxPowerOfFiveExponent * 815)
                                                 / (351 * integerPartWidth));
+  int ilogb(const APFloat &Arg);
 }
 
 /* A bunch of private, handy routines.  */
