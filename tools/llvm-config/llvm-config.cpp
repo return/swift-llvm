@@ -327,7 +327,11 @@ int main(int argc, char **argv) {
         ("-I" + ActiveIncludeDir + " " + "-I" + ActiveObjRoot + "/include");
   } else {
     ActivePrefix = CurrentExecPrefix;
+#ifdef __HAIKU__
+    ActiveIncludeDir = ActivePrefix + "/develop/headers";
+#else
     ActiveIncludeDir = ActivePrefix + "/include";
+#endif
     ActiveBinDir = ActivePrefix + "/bin";
     ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
     ActiveIncludeOption = "-I" + ActiveIncludeDir;
@@ -536,11 +540,20 @@ int main(int argc, char **argv) {
       } else if (Arg == "--has-global-isel") {
         OS << LLVM_HAS_GLOBAL_ISEL << '\n';
       } else if (Arg == "--shared-mode") {
-        PrintSharedMode = true;
-      } else if (Arg == "--obj-root") {
-        OS << ActivePrefix << '\n';
-      } else if (Arg == "--src-root") {
-        OS << LLVM_SRC_ROOT << '\n';
+        PrintSharedMode = true;        
+      } else if (Arg == "--obj-root" || Arg == "--src-root") {
+        if (IsInDevelopmentTree) {
+          if (Arg == "--obj-root") {
+            OS << ActivePrefix << '\n';
+	   		}
+          else {
+            OS << LLVM_SRC_ROOT << '\n';
+	  		}
+        } 
+        else {
+          llvm::errs() << "llvm-config: sources not installed\n";
+          exit(1);
+        }
       } else if (Arg == "--link-shared") {
         LinkMode = LinkModeShared;
       } else if (Arg == "--link-static") {
