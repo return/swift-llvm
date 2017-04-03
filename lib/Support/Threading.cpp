@@ -23,7 +23,7 @@
 using namespace llvm;
 
 bool llvm::llvm_is_multithreaded() {
-#if LLVM_ENABLE_THREADS != 0
+#if LLVM_ENABLE_THREADS != 0 || LLVM_ENABLE_THREADS
   return true;
 #else
   return false;
