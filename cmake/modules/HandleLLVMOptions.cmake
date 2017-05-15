@@ -586,7 +586,7 @@ add_llvm_definitions( -D__STDC_LIMIT_MACROS )
 if (UNIX AND
     CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
     CMAKE_GENERATOR STREQUAL "Ninja")
-  append("-fcolor-diagnostics" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  append("-fdiagnostics-color=auto" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
 endif()
 
 # Add flags for add_dead_strip().
