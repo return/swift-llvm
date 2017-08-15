@@ -332,11 +332,16 @@ int main(int argc, char **argv) {
         ("-I" + ActiveIncludeDir + " " + "-I" + ActiveObjRoot + "/include");
   } else {
     ActivePrefix = CurrentExecPrefix;
+#ifdef __HAIKU__
+    ActiveIncludeDir = ActivePrefix + "/develop/headers";
+    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
+#else
     ActiveIncludeDir = ActivePrefix + "/include";
+    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
+#endif
     SmallString<256> path(StringRef(LLVM_TOOLS_INSTALL_DIR));
     sys::fs::make_absolute(ActivePrefix, path);
     ActiveBinDir = path.str();
-    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
     ActiveCMakeDir = ActiveLibDir + "/cmake/llvm";
     ActiveIncludeOption = "-I" + ActiveIncludeDir;
   }
@@ -556,10 +561,16 @@ int main(int argc, char **argv) {
         OS << (LLVM_HAS_GLOBAL_ISEL ? "ON" : "OFF") << '\n';
       } else if (Arg == "--shared-mode") {
         PrintSharedMode = true;
-      } else if (Arg == "--obj-root") {
-        OS << ActivePrefix << '\n';
-      } else if (Arg == "--src-root") {
-        OS << LLVM_SRC_ROOT << '\n';
+      } else if (Arg == "--obj-root" || Arg == "--src-root") {
+        if (IsInDevelopmentTree) {
+          if (Arg == "--obj-root")
+            OS << ActivePrefix << '\n';
+          else
+            OS << LLVM_SRC_ROOT << '\n';
+        } else {
+          llvm::errs() << "llvm-config: sources not installed\n";
+          exit(1);
+        }
       } else if (Arg == "--ignore-libllvm") {
         LinkDyLib = false;
         LinkMode = BuiltSharedLibs ? LinkModeShared : LinkModeAuto;
